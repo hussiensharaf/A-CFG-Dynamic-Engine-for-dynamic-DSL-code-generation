@@ -58,3 +58,4 @@ langchain-openai
 langchain-ollama
 langchain-nvidia-ai-endpoints
 python-dotenv
+folium
