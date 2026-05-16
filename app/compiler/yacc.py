@@ -92,17 +92,88 @@ def p_select(p):
                 alias_mapping[join_alias] = join_var
             
             # Perform join
+            # Extract ALL column pairs from ON conditions (supports multiple ON columns with AND)
+            def extract_all_conditions(cond):
+                """Recursively extract all simple conditions from nested AND structure"""
+                conditions = []
+                if isinstance(cond, dict):
+                    if 'operator' in cond and cond['operator'].upper() == 'AND':
+                        # Complex condition with AND - extract from both sides
+                        conditions.extend(extract_all_conditions(cond['left']))
+                        conditions.extend(extract_all_conditions(cond['right']))
+                    elif 'left' in cond and 'right' in cond:
+                        # Simple condition
+                        conditions.append(cond)
+                return conditions
+            
+            all_conditions = extract_all_conditions(on_condition)
+            
             # Extract column names without alias (A.col → col)
-            left_col = on_condition['left'].split('.', 1)[-1]
-            right_col = on_condition['right'].split('.', 1)[-1]
-
-            join_code += f"extracted_data = etl.join(\n"
-            join_code += f"    extracted_data,\n"
-            join_code += f"    {join_var},\n"
-            join_code += f"    '{left_col}',\n"
-            join_code += f"    '{right_col}',\n"
-            join_code += f"    how='{join_type}'\n"
-            join_code += f")\n"
+            join_pairs = []
+            for base_condition in all_conditions:
+                left_col = base_condition['left'].split('.', 1)[-1]
+                right_col = base_condition['right'].split('.', 1)[-1]
+                join_pairs.append((left_col, right_col))
+            
+            # Determine suffixes once per join: use alias or dataset index
+            right_suffix = f"_{join_alias}" if join_alias else f"_t{idx+1}"
+            
+            # Generate join code for each column pair
+            for col_idx, (left_col, right_col) in enumerate(join_pairs):
+                if col_idx == 0:
+                    # Auto-detect tolerance for coordinate/spatial columns
+                    tolerance_val = "None"
+                    col_lower = left_col.lower()
+                    if any(x in col_lower for x in ["lat", "latitude", "lon", "longitude", "x", "y"]):
+                        # Use 0.0001 degree precision (~11 meters at equator)
+                        tolerance_val = "0.0001"
+                    elif any(x in col_lower for x in ["time", "timestamp", "date"]):
+                        # For time columns, use no tolerance (should be exact)
+                        tolerance_val = "None"
+                    
+                    # First join
+                    join_code += f"extracted_data = etl.join(\n"
+                    join_code += f"    extracted_data,\n"
+                    join_code += f"    {join_var},\n"
+                    join_code += f"    '{left_col}',\n"
+                    join_code += f"    '{right_col}',\n"
+                    join_code += f"    how='{join_type}',\n"
+                    join_code += f"    left_suffix='',\n"
+                    join_code += f"    right_suffix='{right_suffix}',\n"
+                    join_code += f"    tolerance={tolerance_val}\n"
+                    join_code += f")\n"
+                else:
+                    # Additional joins on the same tables for remaining columns
+                    # After merge, the right column has the suffix appended
+                    right_col_suffixed = f"{right_col}{right_suffix}"
+                    
+                    # Auto-detect tolerance for coordinate/spatial columns
+                    col_lower = left_col.lower()
+                    if any(x in col_lower for x in ["lat", "latitude", "lon", "longitude", "x", "y"]):
+                        # Use 0.0001 degree precision (~11 meters at equator)
+                        join_code += f"# Additional join on {left_col} ≈ {right_col} (with tolerance 0.0001)\n"
+                        join_code += f"extracted_data = extracted_data[\n"
+                        join_code += f"    (abs(extracted_data['{left_col}'] - extracted_data['{right_col_suffixed}']) <= 0.0001) |\n"
+                        join_code += f"    (extracted_data['{left_col}'].isna() & extracted_data['{right_col_suffixed}'].isna())\n"
+                        join_code += f"]\n"
+                    else:
+                        # Exact match for non-coordinate columns
+                        join_code += f"# Additional join on {left_col} = {right_col}\n"
+                        join_code += f"extracted_data = extracted_data[\n"
+                        join_code += f"    (extracted_data['{left_col}'] == extracted_data['{right_col_suffixed}']) |\n"
+                        join_code += f"    (extracted_data['{left_col}'].isna() & extracted_data['{right_col_suffixed}'].isna())\n"
+                        join_code += f"]\n"
+        
+        # After all joins, drop duplicate coordinate columns (keep only the unsuffixed ones from main dataset)
+        if join_clauses:
+            suffixes_list = []
+            for jdx, jc in enumerate(join_clauses):
+                suffix = f"_{jc.get('alias')}" if jc.get('alias') else f"_t{jdx+1}"
+                suffixes_list.append(suffix)
+            
+            join_code += f"# Drop duplicate coordinate columns from joined datasets\n"
+            join_code += f"cols_to_drop = [col for col in extracted_data.columns if (any(coord in col.lower() for coord in ['latitude', 'longitude', 'lat', 'lon']) and any(col.endswith(s) for s in {suffixes_list}))]\n"
+            join_code += f"extracted_data = extracted_data.drop(columns=cols_to_drop, errors='ignore')\n"
 
     # ---- WHERE, GROUP, ORDER, LIMIT ----
     where_clause = p[8]
@@ -115,15 +186,17 @@ def p_select(p):
     # Build alias → suffix map (for pandas merge)
     alias_suffix = {}
 
-    # main SELECT table always gets "_left"
+    # main SELECT table gets no suffix (left_suffix='')
     if main_alias:
-        alias_suffix[main_alias] = "_left"
+        alias_suffix[main_alias] = ""
 
-    # join tables get "_right" (for now supporting one join)
+    # join tables get unique suffixes based on alias or index
     if join_clauses:
-        for jc in join_clauses:
+        for idx, jc in enumerate(join_clauses):
             if jc['alias']:
-                alias_suffix[jc['alias']] = "_right"
+                alias_suffix[jc['alias']] = f"_{jc['alias']}"
+            else:
+                alias_suffix[f"join_df_{idx}"] = f"_t{idx+1}"
 
     def normalize_column(col):
         # Column is something like "A.firstname"
@@ -171,11 +244,19 @@ def p_select(p):
 ###########################
 # ==== TABLE SOURCE (with optional alias) ====
 ###########################
-def p_table_source_with_alias(p):
+def p_table_source_with_explicit_alias(p):
     """table_source : DATASOURCE AS SIMPLE_COLNAME"""
     p[0] = {
         'datasource': p[1],
         'alias': p[3]
+    }
+
+
+def p_table_source_with_implicit_alias(p):
+    """table_source : DATASOURCE SIMPLE_COLNAME"""
+    p[0] = {
+        'datasource': p[1],
+        'alias': p[2]
     }
 
 
@@ -222,11 +303,13 @@ def p_join_clause(p):
 ###########################
 # ==== JOIN TYPES ====
 ###########################
-def p_join_type_inner(p):
-    """join_type : JOIN
-                 | INNER JOIN"""
+def p_join_type_implicit(p):
+    """join_type : JOIN"""
     p[0] = 'inner'
-
+    
+def p_join_type_inner(p):
+    """join_type : INNER JOIN"""
+    p[0] = 'inner'
 
 def p_join_type_left(p):
     """join_type : LEFT JOIN

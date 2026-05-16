@@ -143,10 +143,21 @@ class GoogleEarthAPIDataCollector:
             else:
                 raise e
 
-        # Homogenize bands: Select bands from the first image to ensure consistency
-        # This fixes errors with heterogeneous collections (e.g., NOAA/CFSR)
-        first_image_bands = ee.Image(collection.first()).bandNames()
-        collection = collection.select(first_image_bands)
+        # Handle heterogeneous collections like Sentinel-1 GRD (different polarization modes: HH/HV vs VV/VH)
+        if "COPERNICUS/S1" in dataset:
+            # For Sentinel-1, use mosaic to merge all images and handle heterogeneous bands
+            # This creates a composite of all images, which works even with different polarization modes
+            image = collection.mosaic()
+            # Convert single image back to collection for getRegion()
+            collection = ee.ImageCollection([image])
+        else:
+            # For other datasets, try standard band homogenization
+            try:
+                first_image_bands = ee.Image(collection.first()).bandNames()
+                collection = collection.select(first_image_bands)
+            except ee.EEException:
+                # If band selection fails, use the collection as-is
+                pass
 
         data = collection.getRegion(point, scale).getInfo()
         if not data or len(data) < 2:

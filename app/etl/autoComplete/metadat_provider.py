@@ -162,7 +162,7 @@ class MetadataProvider:
         
         "SENTINEL1": [
             # SAR bands
-            "VV", "VH", "HH", "HV",
+            "VV", "VH", "HV", "HH",
             # Angles
             "angle", "incidence_angle",
         ],

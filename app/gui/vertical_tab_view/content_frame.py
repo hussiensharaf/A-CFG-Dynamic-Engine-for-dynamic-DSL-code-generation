@@ -150,23 +150,27 @@ class TabContent(ctk.CTkFrame):
             return None
 
         pattern = re.compile(
-            r'\{gee:([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^}]+)\}',
+            r'\{gee:([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^}]+)\}',
             re.IGNORECASE
         )
 
-        match = pattern.search(sql)
-        if not match:
+        matches = pattern.findall(sql)
+        if not matches:
             return None
 
         try:
-            return {
-                "project": match.group(1),
-                "start_date": match.group(2),
-                "end_date": match.group(3),
-                "longitude": float(match.group(4)),
-                "latitude": float(match.group(5)),
-                "scale": float(match.group(6)),
-            }
+            datasets = []
+            for match in matches:
+                datasets.append({
+                    "project": match[0],
+                    "dataset": match[1],
+                    "start_date": match[2],
+                    "end_date": match[3],
+                    "longitude": float(match[4]),
+                    "latitude": float(match[5]),
+                    "scale": float(match[6]),
+                })
+            return datasets if datasets else None
         except Exception as e:
             print("GEE metadata parse error:", e)
             return None

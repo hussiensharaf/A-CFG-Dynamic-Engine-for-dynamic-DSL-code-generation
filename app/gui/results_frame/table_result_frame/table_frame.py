@@ -40,6 +40,15 @@ class TableResultFrame(ctk.CTkFrame):
             self,
             text="Table",
         )
+        
+        # Label for GEE datasets info
+        self.datasets_label = ctk.CTkLabel(
+            self,
+            text="",
+            text_color="gray",
+            font=("Arial", 9)
+        )
+        
         self.table = TableWidget(self)
         
         # Button frame for visualization buttons
@@ -68,6 +77,7 @@ class TableResultFrame(ctk.CTkFrame):
         
         self.table_theme = ""
         self.label.pack(pady=5)
+        self.datasets_label.pack(pady=2)
         self.table.pack(fill="both", expand=True, padx=5)
         self.table.pack_propagate(False)
         
@@ -97,16 +107,26 @@ class TableResultFrame(ctk.CTkFrame):
         # Hide map button when table is cleared
         self.map_button.pack_forget()
 
-    def set_gee_metadata(self, metadata: Optional[Dict]) -> None:
+    def set_gee_metadata(self, metadata: Optional[Dict | list]) -> None:
         """Store Google Earth Engine query metadata and show/hide map button"""
         self.gee_metadata = metadata
         
         # Show map button only if we have GEE metadata
         if metadata is not None:
+            # Format metadata for display
+            if isinstance(metadata, list):
+                dataset_names = ", ".join([m['dataset'] for m in metadata])
+                self.datasets_label.configure(text=f"Datasets: {dataset_names}")
+                print(f"DEBUG GEE DATASETS: {dataset_names}")
+            else:
+                self.datasets_label.configure(text=f"Dataset: {metadata['dataset']}")
+                print(f"DEBUG GEE DATASET: {metadata['dataset']}")
+            
             # Show the map button
             self.map_button.pack(side="left", padx=5)
         else:
-            # Hide the map button for non-GEE queries
+            # Hide the datasets label and map button for non-GEE queries
+            self.datasets_label.configure(text="")
             self.map_button.pack_forget()
     
     def show_map(self):
