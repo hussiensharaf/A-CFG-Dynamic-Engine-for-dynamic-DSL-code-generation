@@ -348,7 +348,7 @@ class MapVisualizationWindow(ctk.CTkToplevel):
    Lat: {self.gee_metadata.get('latitude')}°
    Lon: {self.gee_metadata.get('longitude')}°
 
-📏 Radius: {self.gee_metadata.get('scale')}m
+📏 {'Area (Polygon)' if self.gee_metadata.get('is_area') else f"Radius: {self.gee_metadata.get('scale')}m"}
 
 📅 Date Range:
    {self.gee_metadata.get('start_date')} to
@@ -410,47 +410,52 @@ class MapVisualizationWindow(ctk.CTkToplevel):
             return None
     
     def generate_heatmap_data(self) -> List[Tuple[float, float, float]]:
-        """
-        Generate heatmap points distributed within the circle.
-        Uses current variable values interpolated spatially.
-        """
+        """Generate heatmap points — circle or polygon depending on query type."""
         lat = self.gee_metadata.get('latitude')
         lon = self.gee_metadata.get('longitude')
         scale = self.gee_metadata.get('scale')
-        
-        # Get current value
+        is_area = self.gee_metadata.get('is_area', False)
+        coords = self.gee_metadata.get('coordinates', [])
+
         row_data = self.get_current_row_data()
         if row_data is None or self.current_variable not in row_data:
             return []
-        
+
         center_value = row_data[self.current_variable]
         if pd.isna(center_value):
             return []
-        
-        # Convert scale to degrees
-        lat_offset = scale / 111320
-        lon_offset = scale / (111320 * np.cos(np.radians(lat)))
-        
-        # Generate points with gradient (stronger at center)
+
         heatmap_data = []
-        num_points = 1000
-        
-        for i in range(num_points):
-            # Random point in circle
-            r = np.sqrt(np.random.random())
-            theta = np.random.random() * 2 * np.pi
-            
-            point_lat = lat + r * lat_offset * np.cos(theta)
-            point_lon = lon + r * lon_offset * np.sin(theta)
-            
-            # Gradient: value decreases with distance from center
-            # Add some randomness for natural look
-            distance_factor = 1 - (r * 0.3)  # 30% decrease at edge
-            noise = np.random.normal(0, 0.05)  # 5% noise
-            point_value = center_value * distance_factor * (1 + noise)
-            
-            heatmap_data.append((point_lat, point_lon, point_value))
-        
+        num_points = 500
+
+        if is_area and len(coords) >= 3:
+            # Generate points inside the polygon bounding box
+            lons = [c[0] for c in coords]
+            lats = [c[1] for c in coords]
+            min_lon, max_lon = min(lons), max(lons)
+            min_lat, max_lat = min(lats), max(lats)
+
+            for _ in range(num_points):
+                point_lon = np.random.uniform(min_lon, max_lon)
+                point_lat = np.random.uniform(min_lat, max_lat)
+                noise = np.random.normal(0, 0.05)
+                point_value = center_value * (1 + noise)
+                heatmap_data.append((point_lat, point_lon, point_value))
+        else:
+            # Original circle logic
+            lat_offset = scale / 111320
+            lon_offset = scale / (111320 * np.cos(np.radians(lat)))
+
+            for i in range(num_points):
+                r = np.sqrt(np.random.random())
+                theta = np.random.random() * 2 * np.pi
+                point_lat = lat + r * lat_offset * np.cos(theta)
+                point_lon = lon + r * lon_offset * np.sin(theta)
+                noise = np.random.normal(0, 0.05)
+                distance_factor = 1 - (r * 0.3)
+                point_value = center_value * distance_factor * (1 + noise)
+                heatmap_data.append((point_lat, point_lon, point_value))
+
         return heatmap_data
     
     def update_map(self):
@@ -544,17 +549,31 @@ class MapVisualizationWindow(ctk.CTkToplevel):
                 icon=folium.Icon(color='red', icon='info-sign', prefix='glyphicon')
             ).add_to(m)
             
-            # Add collection circle
-            folium.Circle(
-                location=[lat, lon],
-                radius=scale,
-                color='#0066FF',
-                fill=True,
-                fillColor='#ADD8E6',
-                fillOpacity=0.2,
-                weight=2,
-                popup=f"Collection Radius: {scale}m"
-            ).add_to(m)
+            # Draw polygon or circle depending on query type
+            if self.gee_metadata.get('is_area') and self.gee_metadata.get('coordinates'):
+                coords = self.gee_metadata.get('coordinates')
+                # Convert [lon, lat] to [lat, lon] for folium
+                folium_coords = [[c[1], c[0]] for c in coords]
+                folium.Polygon(
+                    locations=folium_coords,
+                    color='#0066FF',
+                    fill=True,
+                    fillColor='#ADD8E6',
+                    fillOpacity=0.2,
+                    weight=2,
+                    popup="Study Area"
+                ).add_to(m)
+            else:
+                folium.Circle(
+                    location=[lat, lon],
+                    radius=scale,
+                    color='#0066FF',
+                    fill=True,
+                    fillColor='#ADD8E6',
+                    fillOpacity=0.2,
+                    weight=2,
+                    popup=f"Collection Radius: {scale}m"
+                ).add_to(m)
             
             # Add legend
             center_value_legend = f"{center_value:.4f}" if pd.notna(center_value) else "N/A"

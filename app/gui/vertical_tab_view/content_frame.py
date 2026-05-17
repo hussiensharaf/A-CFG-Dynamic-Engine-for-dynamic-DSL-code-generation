@@ -1,21 +1,8 @@
 import sqlparse
-import os
-import sys
-import threading
-import re
-
-
-# Add AI Assistant to path
-from ai_assistant.GEEQueryAssistant import GEEQueryAssistant
-
-try:
-    from ai_assistant.GEEQueryAssistant import GEEQueryAssistant
-except ImportError:
-    GEEQueryAssistant = None
-
 from typing import Any, Tuple
 import customtkinter as ctk
 import re
+import csv
 
 
 from app.core.result_monad import Success
@@ -24,12 +11,7 @@ from app.gui.error_frame.error_frame import ErrorFrame
 
 from app.gui.results_frame.results_frame import ResultsFrame
 from app.gui.vertical_tab_view.sql_textbox_colorizer import Colorizer
-from app.gui.vertical_tab_view.input_dialog import SQLGeneratorDialog
-
-# استيراد مكونات Autocomplete
-from app.etl.autoComplete.autocomplete_engine import AutocompleteEngine
-from app.etl.autoComplete.autocomplete_widget import AutocompleteTextbox
-from app.etl.autoComplete.metadat_provider import MetadataProvider
+from tkinter import filedialog
 
 
 class TabContent(ctk.CTkFrame):
@@ -60,11 +42,6 @@ class TabContent(ctk.CTkFrame):
             overwrite_preferred_drawing_method,
             **kwargs,
         )
-        
-        # تهيئة Autocomplete قبل إضافة الويدجتس
-        self.metadata_provider = MetadataProvider()
-        self.autocomplete_engine = AutocompleteEngine(self.metadata_provider)
-        
         self.add_children_widget()
 
         self.sql_textbox_theme = ctk.get_appearance_mode().lower()
@@ -73,20 +50,8 @@ class TabContent(ctk.CTkFrame):
         else:
             self.sql_textbox_theme = "light"
         
-        # ربط Autocomplete بالـ SQL textbox
-        self.autocomplete = AutocompleteTextbox(
-            self.sql_textbox,
-            self.autocomplete_engine,
-            trigger_chars=".|{",
-            min_chars=0
-        )
-
         # Store the last executed SQL query
         self.last_sql_query = ""
-
-        # AI assistant instance (lazy initialization)
-        self.assistant = None
-
 
     def add_children_widget(self):
         self.sql_textbox = ctk.CTkTextbox(
@@ -98,8 +63,96 @@ class TabContent(ctk.CTkFrame):
                 self.sql_textbox, self.sql_textbox_theme
             ),
         )
-        # Button Frame (for Execute, Run, Delete, Up, Down buttons)
+
+        # Satellite selector frame
+        self.satellite_frame = ctk.CTkFrame(self, fg_color="transparent")
+
+        self.satellite_label = ctk.CTkLabel(
+            self.satellite_frame,
+            text="Satellite:",
+            font=("Consolas", 14, "bold")
+        )
+
+        self.satellites = {
+            "ERA5 Daily": "ECMWF/ERA5/DAILY",
+            "ERA5 Land Daily": "ECMWF/ERA5_LAND/DAILY_AGGR",
+            "Sentinel-2": "COPERNICUS/S2_SR_HARMONIZED",
+            "Landsat 8": "LANDSAT/LC08/C01/T1_SR",
+            "SMAP": "NASA/SMAP/SPL3SMP_E/005",
+            "CHIRPS": "UCSB-CHG/CHIRPS/DAILY",
+        }
+
+        self.satellite_dropdown = ctk.CTkComboBox(
+            self.satellite_frame,
+            values=list(self.satellites.keys()),
+            command=self.on_satellite_selected,
+            width=220,
+        )
+        self.satellite_dropdown.set("Select Satellite...")
+
+        self.satellite_id_label = ctk.CTkLabel(
+            self.satellite_frame,
+            text="",
+            font=("Consolas", 12),
+            text_color=("gray40", "gray60")
+        )
+
+        self.insert_satellite_btn = ctk.CTkButton(
+            self.satellite_frame,
+            text="Insert into Query",
+            command=self.insert_satellite_into_query,
+            width=140,
+            height=28,
+            font=("Consolas", 12),
+        )
+
+        # Area selector frame
+        self.area_frame = ctk.CTkFrame(self, fg_color="transparent")
+
+        self.area_label = ctk.CTkLabel(
+            self.area_frame,
+            text="Area:",
+            font=("Consolas", 14, "bold")
+        )
+
+        self.load_areas_btn = ctk.CTkButton(
+            self.area_frame,
+            text="Load Areas CSV",
+            command=self.load_areas_csv,
+            width=130,
+            height=28,
+            font=("Consolas", 12),
+        )
+
+        self.area_dropdown = ctk.CTkComboBox(
+            self.area_frame,
+            values=["No areas loaded..."],
+            width=200,
+        )
+        self.area_dropdown.set("No areas loaded...")
+
+        self.area_mode = ctk.CTkSegmentedButton(
+            self.area_frame,
+            values=["Circle", "Polygon"],
+            width=150,
+        )
+        self.area_mode.set("Circle")
+
+        self.insert_area_btn = ctk.CTkButton(
+            self.area_frame,
+            text="Insert Area",
+            command=self.insert_area_into_query,
+            width=110,
+            height=28,
+            font=("Consolas", 12),
+        )
+
+        # Store loaded areas data
+        self.areas_data = {}
+
+        # Button Frame
         self.btn_frame = ctk.CTkFrame(self, height=40, fg_color="transparent")
+
         # Execute Button
         self.execute_btn = ctk.CTkButton(
             self.btn_frame,
@@ -109,7 +162,8 @@ class TabContent(ctk.CTkFrame):
             fg_color="#51ab46",
             hover_color="#387731",
         )
-        # Run Button
+
+        # Compile Button
         self.run_btn = ctk.CTkButton(
             self.btn_frame,
             text="Compile",
@@ -117,14 +171,6 @@ class TabContent(ctk.CTkFrame):
             width=80,
         )
 
-        # Generate SQL Button
-        self.generate_sql_btn = ctk.CTkButton(
-            self.btn_frame,
-            text="Generate SQL",
-            command=self.generate_sql,
-            width=100,
-        )
-        
         self.results_section = ResultsFrame(self)
         self.error_section = ErrorFrame(
             self,
@@ -133,16 +179,79 @@ class TabContent(ctk.CTkFrame):
             border_color=("#cfcfcf", "#333333"),
             height=50,
         )
+
+        # Pack satellite frame
+        self.satellite_frame.pack(fill="x", padx=10, pady=(5, 0))
+        self.satellite_label.pack(side="left", padx=5)
+        self.satellite_dropdown.pack(side="left", padx=5)
+        self.satellite_id_label.pack(side="left", padx=5)
+        self.insert_satellite_btn.pack(side="left", padx=5)
+
+        # Pack area frame
+        self.area_frame.pack(fill="x", padx=10, pady=(2, 0))
+        self.area_label.pack(side="left", padx=5)
+        self.load_areas_btn.pack(side="left", padx=5)
+        self.area_dropdown.pack(side="left", padx=5)
+        self.area_mode.pack(side="left", padx=5)
+        self.insert_area_btn.pack(side="left", padx=5)
+
+        # Pack rest
         self.sql_textbox.pack(fill="both", expand=True, padx=10, pady=5)
         self.btn_frame.pack(fill="x", pady=5, padx=10)
         self.execute_btn.pack(side="left", padx=5)
         self.run_btn.pack(side="left", padx=5)
-        self.generate_sql_btn.pack(side="left", padx=5)
         self.results_section.pack(fill="both", expand=True, pady=5, padx=10)
         self.results_section.pack_propagate(False)
         self.error_section.pack(fill="x", pady=5, padx=10)
         self.error_section.pack_propagate(False)
 
+    def extract_gee_metadata(self, sql_query: str):
+        """
+        Extract Google Earth Engine metadata from SQL query.
+        Handles both circle and AREA formats.
+        """
+        try:
+            # Check for AREA format first
+            area_pattern = r'\{gee:([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|AREA\(\((.+?)\)\)\}'
+            area_match = re.search(area_pattern, sql_query)
+
+            if area_match:
+                # Parse coordinates from AREA
+                coord_str = area_match.group(5)
+                pairs = re.findall(r'([\d.+-]+)\s*,\s*([\d.+-]+)', coord_str)
+                coords = [[float(lon), float(lat)] for lon, lat in pairs]
+
+                # Calculate center point from polygon
+                center_lon = sum(c[0] for c in coords) / len(coords)
+                center_lat = sum(c[1] for c in coords) / len(coords)
+
+                return {
+                    'project': area_match.group(1),
+                    'dataset': area_match.group(2),
+                    'start_date': area_match.group(3),
+                    'end_date': area_match.group(4),
+                    'longitude': center_lon,
+                    'latitude': center_lat,
+                    'scale': 1000,
+                    'is_area': True,
+                    'coordinates': coords
+                }
+
+            # Old circle format
+            circle_pattern = r'\{gee:([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^}]+)\}'
+            match = re.search(circle_pattern, sql_query)
+
+            if match:
+                return {
+                    'project': match.group(1),
+                    'dataset': match.group(2),
+                    'start_date': match.group(3),
+                    'end_date': match.group(4),
+                    'longitude': float(match.group(5)),
+                    'latitude': float(match.group(6)),
+                    'scale': float(match.group(7)),
+                    'is_area': False
+                }
 
 
     def extract_gee_metadata(self, sql: str):
@@ -172,9 +281,8 @@ class TabContent(ctk.CTkFrame):
                 })
             return datasets if datasets else None
         except Exception as e:
-            print("GEE metadata parse error:", e)
+            print(f"Error extracting GEE metadata: {e}")
             return None
-
 
     def execute_python(self):
         # Fetch Python code from the text box
@@ -197,9 +305,7 @@ class TabContent(ctk.CTkFrame):
             
             # Extract and store GEE metadata if this was a GEE query
             gee_metadata = self.extract_gee_metadata(self.last_sql_query)
-            print("DEBUG GEE METADATA:", gee_metadata)
             self.results_section.table_section.set_gee_metadata(gee_metadata)
-            
         else:
             # Execution failed; display Python code and error in DataFrame section
             execution_error = execution_result.unwrap_error()
@@ -241,58 +347,6 @@ class TabContent(ctk.CTkFrame):
             self.error_section.set_error(error_message)
         self.results_section.table_section.clear_table()
 
-    def generate_sql(self):
-        dialog = SQLGeneratorDialog(self)
-        user_input = dialog.get_input()
-        
-        if user_input:
-            # Show loading state
-            self.sql_textbox.delete("1.0", "end")
-            self.sql_textbox.insert("1.0", "-- Generating SQL... Please wait.")
-            self.generate_sql_btn.configure(state="disabled")
-            
-            # Run in a separate thread
-            threading.Thread(target=self._run_generate_sql_thread, args=(user_input,), daemon=True).start()
-
-    def _run_generate_sql_thread(self, user_input):
-        try:
-            if not GEEQueryAssistant:
-                raise ImportError("Could not import GEEQueryAssistant. Check dependencies and paths.")
-            
-            if not self.assistant:
-                # Define paths
-                ai_dir = os.path.join(os.getcwd(), "ai_assistant")
-                json_path = os.path.join(ai_dir, "GEE_datasets_augmented_threaded.json")
-                persist_dir = os.path.join(ai_dir, "chroma_db_v2")
-                
-                if not os.path.exists(json_path):
-                        raise FileNotFoundError(f"Dataset file not found: {json_path}")
-
-                self.assistant = GEEQueryAssistant(
-                    json_path=json_path,
-                    persist_directory=persist_dir
-                )
-            
-            generated_sql = self.assistant.generate_sql(user_input)
-            
-            # Update GUI in main thread
-            self.after(0, self._update_sql_textbox, generated_sql)
-            
-        except Exception as e:
-            self.after(0, self._handle_generation_error, str(e))
-
-    def _update_sql_textbox(self, sql_query):
-        self.sql_textbox.delete("1.0", "end")
-        self.sql_textbox.insert("1.0", sql_query)
-        Colorizer.highlight_syntax(self.sql_textbox, self.sql_textbox_theme)
-        self.error_section.clear_error()
-        self.generate_sql_btn.configure(state="normal")
-
-    def _handle_generation_error(self, error_message):
-        self.error_section.set_error(f"AI Assistant Error: {error_message}")
-        self.sql_textbox.delete("1.0", "end")
-        self.generate_sql_btn.configure(state="normal")
-
     def copy_to_clipboard(self, text: str):
         # Copy the provided text to the clipboard
         self.clipboard_clear()
@@ -302,3 +356,58 @@ class TabContent(ctk.CTkFrame):
     def change_sql_textbox_theme(self, theme: str) -> None:
         self.sql_textbox_theme = theme
         Colorizer.highlight_syntax(self.sql_textbox, theme)
+
+    def on_satellite_selected(self, selected_name):
+        dataset_id = self.satellites.get(selected_name, "")
+        self.satellite_id_label.configure(text=dataset_id)
+
+    def insert_satellite_into_query(self):
+        selected_name = self.satellite_dropdown.get()
+        dataset_id = self.satellites.get(selected_name, "")
+        if not dataset_id:
+            return
+        self.sql_textbox.insert("insert", dataset_id)
+        Colorizer.highlight_syntax(self.sql_textbox, self.sql_textbox_theme)
+
+    def load_areas_csv(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Areas CSV File",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if not file_path:
+            return
+        try:
+            self.areas_data = {}
+            with open(file_path, newline='', encoding='utf-8') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    name = row['name'].strip()
+                    lon = float(row['longitude'].strip())
+                    lat = float(row['latitude'].strip())
+                    self.areas_data[name] = {'longitude': lon, 'latitude': lat}
+            if self.areas_data:
+                self.area_dropdown.configure(values=list(self.areas_data.keys()))
+                self.area_dropdown.set(list(self.areas_data.keys())[0])
+        except Exception as e:
+            print(f"Error loading CSV: {e}")
+
+    def insert_area_into_query(self):
+        selected_area = self.area_dropdown.get()
+        area = self.areas_data.get(selected_area)
+        if not area:
+            return
+        lon = area['longitude']
+        lat = area['latitude']
+        mode = self.area_mode.get()
+        if mode == "Circle":
+            text = f"{lon}|{lat}|9000"
+        else:
+            offset = 0.05
+            text = (
+                f"AREA(({lon-offset},{lat-offset}),"
+                f"({lon+offset},{lat-offset}),"
+                f"({lon+offset},{lat+offset}),"
+                f"({lon-offset},{lat+offset}))"
+            )
+        self.sql_textbox.insert("insert", text)
+        Colorizer.highlight_syntax(self.sql_textbox, self.sql_textbox_theme)

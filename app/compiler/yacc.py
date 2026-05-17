@@ -35,27 +35,28 @@ def p_error(p):
     )
 
 
+# else:
+#         raise ParserError("Syntax error at EOF")
+
+
 ###########################
-# ==== SELECT STATEMENT WITH ADVANCED JOIN ====
+# ==== SELECT STATEMENT​​ ====
 ###########################
+
+
 def p_select(p):
-    """select : SELECT distinct select_columns into_statement FROM table_source join_clauses where group order limit_or_tail SIMICOLON"""
+    """select : SELECT distinct select_columns into_statement FROM DATASOURCE where group order limit_or_tail SIMICOLON"""
+    if type(p[3]) == str:
+        p[3] = "'" + p[3] + "'"
 
-    # ---- الداتا سورس الأساسي ----
-    main_table = p[6]  # {'datasource': 'csv:file.csv', 'alias': 't1' or None}
-    
-    # ---- Parse main datasource ----
-    main_ds = main_table['datasource']
-    main_alias = main_table.get('alias')
-    file_type, file_path = main_ds.split(":", 1)
+    file_type, file_path = p[6].split(":", 1)
 
-    # ---- INTO ----
-    load_type = None
-    load_path = None
+    load_stmt = ""
     if p[4]:
         load_type, load_path = p[4].split(":", 1)
+        load_stmt = f"etl.load(transformed_data,'{load_type}','{load_path}')\n"
 
-    load_call = ""
+    load_all = ""
     if load_type and load_path:
         load_call = f"etl.load(transformed_data, '{load_type}', '{load_path}')"
 
@@ -224,20 +225,19 @@ def p_select(p):
     p[0] = (
         "from app import etl\n"
         "from app.compiler.ast_nodes import *\n\n"
-        f"{extract_code}"
-        f"{join_code}"  # JOIN happens here, BEFORE transform
+        f"extracted_data = etl.extract('{file_type}','{file_path}')\n"
         f"transformed_data = etl.transform_select(\n"
-        f"    extracted_data,\n"
-        f"    {{\n"
-        f"        'COLUMNS': {repr(p[3]) if isinstance(p[3], str) else p[3]},\n"
+        f"   extracted_data,\n"
+        f"   {{\n"
+        f"        'COLUMNS':  {p[3]},\n"
         f"        'DISTINCT': {p[2]},\n"
-        f"        'FILTER': {where_clause},\n"
-        f"        'GROUP': {group_clause},\n"
-        f"        'ORDER': {order_clause},\n"
-        f"        'LIMIT_OR_TAIL': {limit_clause},\n"
-        f"    }}\n"
+        f"        'FILTER':   {p[7]},\n"
+        f"        'GROUP':    {p[8]},\n"
+        f"        'ORDER':    {p[9]},\n"
+        f"        'LIMIT_OR_TAIL': {p[10]},\n"
+        f"   }}\n"
         f")\n"
-        f"{load_call}\n"
+        f"{load_stmt}"
     )
 
 
@@ -376,14 +376,8 @@ def p_qualified_column_no_table(p):
 ###########################
 # ==== DOT token (we need to add this) ====
 ###########################
-# NOTE: You need to add DOT token to lex.py:
-# t_DOT = r"\."
-# And add "DOT" to tokens list
 
 
-###########################
-# ==== INSERT STATEMENT ====
-###########################
 def p_insert(p):
     "insert : INSERT INTO DATASOURCE icolumn VALUES insert_values SIMICOLON"
 
@@ -410,6 +404,8 @@ def p_update(p):
 ###########################
 # ==== DELETE STATEMENT​​ ====
 ###########################
+
+
 def p_delete(p):
     "delete : DELETE FROM DATASOURCE where"
     p[0] = None
@@ -418,6 +414,8 @@ def p_delete(p):
 ##########################
 # ====== COMPARISON =======
 ##########################
+
+
 def p_logical(p):
     """logical :  EQUAL
     | NOTEQUAL
@@ -431,6 +429,8 @@ def p_logical(p):
 ##########################
 # ====== WHERE CLAUSE =====
 ##########################
+
+
 def p_where(p):
     "where : WHERE conditions"
     p[0] = p[2]
@@ -462,19 +462,18 @@ def p_conditions_not(p):
 ##########################
 # ========== EXP ==========
 ##########################
+
+
 def p_exp(p):
     """exp : column
     | STRING
     | NUMBER"""
-    p[0] = p[1]
 
-def p_exp_qualified(p):
-    "exp : qualified_column"
     p[0] = p[1]
 
 
 ##########################
-# ========== NUMBER ==========
+# ========== EXP ==========
 ##########################
 def p_NUMBER(p):
     """NUMBER : NEGATIVE_INTNUMBER
@@ -486,6 +485,8 @@ def p_NUMBER(p):
 ###########################
 # ======== Distinct ========
 ###########################
+
+
 def p_distinct(p):
     """distinct : DISTINCT"""
     p[0] = True
@@ -515,14 +516,6 @@ def p_columns(p):
     p[0].extend(p[1])
     p[0].extend(p[3])
 
-def p_column_qualified(p):
-    "column : SIMPLE_COLNAME DOT SIMPLE_COLNAME"
-    p[0] = f"{p[1]}.{p[3]}"
-
-def p_column_qualified_bracket(p):
-    "column : SIMPLE_COLNAME DOT BRACKETED_COLNAME"
-    token = str(p[3])
-    p[0] = f"{p[1]}.{token[1:-1]}"
 
 def p_columns_base(p):
     """columns : column
@@ -543,11 +536,11 @@ def p_aggregation_function(p):
         )
 
 
-
-
 ###########################
 # ===== SELECT COLUMNS​​ =====
 ###########################
+
+
 def p_select_columns_all(p):
     "select_columns : TIMES"
     p[0] = "__all__"
@@ -561,6 +554,8 @@ def p_select_columns(p):
 ###########################
 # ========= Into ===========
 ###########################
+
+
 def p_into_statement(p):
     "into_statement : INTO DATASOURCE"
     p[0] = p[2]
@@ -594,13 +589,16 @@ def p_simple_column_name(p):
 def p_bracketed_column_name(p):
     """bracketed_column_name : BRACKETED_COLNAME"""
     token = str(p[1])
+    # to remove the scare brackets token[1:-1]
     p[0] = ColumnNameNode(token[1:-1])
 
 
 def p_column_index(p):
     """column_index : COLNUMBER"""
     token = str(p[1])
+    # to remove the scare brackets token[1:-1] and cast the str to int
     index = int(token[1:-1])
+
     p[0] = ColumnIndexNode(index=index)
 
 
@@ -666,6 +664,8 @@ def p_way_desc(p):
 ###########################
 # ========= Limit & Tail ==========
 ###########################
+
+
 def p_limit_or_tail(p):
     """limit_or_tail : LIMIT POSITIVE_INTNUMBER
     | TAIL POSITIVE_INTNUMBER"""
@@ -680,9 +680,12 @@ def p_limit_or_tail_empty(p):
 ###########################
 # ========= VALUES​ =========
 ###########################
+
+
 def p_value(p):
     """value : STRING
     | NUMBER"""
+
     p[0] = p[1]
 
 
@@ -696,6 +699,8 @@ def p_values(p):
 ###########################
 # ===== INSERT VALUES​ ======
 ###########################
+
+
 def p_values_end(p):
     "values : value"
     p[0] = [p[1]]
@@ -721,6 +726,8 @@ def p_insert_values_end(p):
 ###########################
 # ===== Insert Columns​​ =====
 ###########################
+
+
 def p_icolumn(p):
     "icolumn : LPAREN icolumns RPAREN"
     p[0] = p[2]
@@ -746,6 +753,8 @@ def p_icolumns_base(p):
 ###########################
 # ==== ASSIGNS STATEMENT​​ ===
 ###########################
+
+
 def p_assign(p):
     "assign : column EQUAL value"
     p[0] = (p[1], p[3])
