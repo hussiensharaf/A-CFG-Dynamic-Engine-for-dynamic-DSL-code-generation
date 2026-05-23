@@ -4,73 +4,65 @@ from app.etl.data.remote.gee.data_processor import DataProcessor
 
 
 class GoogleEarthAPIDataCollector:
-    def __init__(self, projectname: str = None):
-        # Initialize Earth Engine; project is optional now.
-        if projectname:
-            ee.Initialize(project=projectname)
-        else:
-            ee.Initialize()
+    def __init__(self, projectname):
+        ee.Authenticate()
+        ee.Initialize(project=projectname)
 
-    def _resolve_dataset(self, satellite: str) -> str:
-        """Resolve a satellite identifier or dataset alias to an Earth Engine dataset id.
+    def collect(self, start_date, end_date, longitude, latitude, scale):
+        dataset = "ECMWF/ERA5_LAND/DAILY_AGGR"
+        df = self.__load_data_from_dataset(
+            dataset, start_date, end_date, longitude, latitude, scale
+        )
+        weather_df = self.__process_data(df)
+        return weather_df
+    
+    def collect_area(self, dataset, start_date, end_date, coordinates):
+        """Collect data from Earth Engine for a polygon area."""
+        
+        # Auto-close the ring if needed
+        if coordinates[0] != coordinates[-1]:
+            coordinates.append(coordinates[0])
+        
+        polygon = ee.Geometry.Polygon([coordinates])
+        
+        return self.__load_area_from_dataset(dataset, start_date, end_date, polygon)
+    
+    def __load_area_from_dataset(self, dataset, start_date, end_date, polygon):
+        """Load any Earth Engine dataset for a polygon area."""
+        try:
+            collection = ee.ImageCollection(dataset).filterDate(start_date, end_date)
+            if collection.limit(1).size().getInfo() == 0:
+                return pd.DataFrame()
+        except ee.EEException as e:
+            if "found 'Image'" in str(e):
+                collection = ee.ImageCollection([ee.Image(dataset)])
+            else:
+                raise e
 
-        - If `satellite` contains a '/', assume it's already a full dataset id and return it.
-        - Otherwise, map common short aliases (case-insensitive) to dataset ids.
-        - Fall back to ERA5 land daily aggregate if unknown.
-        """
-        if not satellite:
-            return "ECMWF/ERA5_LAND/DAILY_AGGR"
+        first_image_bands = ee.Image(collection.first()).bandNames()
+        collection = collection.select(first_image_bands)
 
-        sat = satellite.strip()
-        if "/" in sat:
-            return sat
+        data = collection.getRegion(polygon, 1000).getInfo()
+        if not data or len(data) < 2:
+            return pd.DataFrame()
 
-        mapping = {
-            "ERA5": "ECMWF/ERA5_LAND/DAILY_AGGR",
-            "ERA5_LAND": "ECMWF/ERA5_LAND/DAILY_AGGR",
-            "S2": "COPERNICUS/S2_SR_HARMONIZED",
-            "SENTINEL2": "COPERNICUS/S2_SR_HARMONIZED",
-            "S1": "COPERNICUS/S1_GRD",
-            "LANDSAT8": "LANDSAT/LC08/C01/T1_SR",
-        }
-
-        key = sat.upper()
-        return mapping.get(key, "ECMWF/ERA5_LAND/DAILY_AGGR")
-
-    def collect(self, satellite, start_date, end_date, longitude, latitude, scale):
-        """Collect data from Earth Engine for a specific point and time range.
-
-        Args:
-            satellite (str): The satellite identifier or alias (e.g., 'ERA5', 'S2').
-            start_date (str): Start date in 'YYYY-MM-DD' format.
-            end_date (str): End date in 'YYYY-MM-DD' format.
-            longitude (float): Longitude of the point.
-            latitude (float): Latitude of the point.
-            scale (float): The scale in meters for the reduction (resolution).
-        """
-        dataset = self._resolve_dataset(satellite)
-        # Branch behavior depending on dataset type
-        if "COPERNICUS/S2" in dataset or "SENTINEL-2" in satellite.upper():
-            # Sentinel-2 is an optical imagery collection with spectral bands
-            df = self.__load_sentinel2(dataset, start_date, end_date, longitude, latitude, scale)
-            return df
-
-        # Specific handling for ERA5 Land Daily Aggregate
-        if dataset == "ECMWF/ERA5_LAND/DAILY_AGGR":
-            df = self.__load_data_from_dataset(
-                dataset, start_date, end_date, longitude, latitude, scale
+        df = pd.DataFrame(data[1:], columns=data[0])
+        if "time" in df.columns:
+            df["date"] = df["time"].apply(
+                lambda x: pd.to_datetime(x / 1000, unit="s").date()
             )
-            weather_df = self.__process_data(df)
-            return weather_df
 
-        # Generic fallback for any other dataset
-        return self.__load_generic_dataset(dataset, start_date, end_date, longitude, latitude, scale)
+        cols = [c for c in df.columns if c not in ["time", "longitude", "latitude"]]
+        cols = cols + [c for c in ["time", "longitude", "latitude"] if c in df.columns]
+        df = df[cols]
+
+        return df
 
     def __process_data(self, df):
         calculator_instance = DataProcessor()
         weather_df = pd.DataFrame()
         weather_df["date"] = df["time"].apply(
-            lambda x: pd.to_datetime(x / 1000, unit="s").date()
+            lambda x: pd.to_datetime(x / 1000, unit="s")
         )
         weather_df["temperature"] = df["temperature_2m"] - 273.15
         weather_df["soil_temperature"] = df["soil_temperature_level_1"] - 273.15
@@ -114,14 +106,6 @@ class GoogleEarthAPIDataCollector:
             df["total_evaporation_sum"]
             - df["evaporation_from_vegetation_transpiration_sum"]
         )
-
-        if "longitude" in df.columns:
-            weather_df["longitude"] = df["longitude"]
-        if "latitude" in df.columns:
-            weather_df["latitude"] = df["latitude"]
-        if "time" in df.columns:
-            weather_df["time"] = df["time"]
-
         weather_df = weather_df.round(5)
         return weather_df
 
@@ -143,10 +127,21 @@ class GoogleEarthAPIDataCollector:
             else:
                 raise e
 
-        # Homogenize bands: Select bands from the first image to ensure consistency
-        # This fixes errors with heterogeneous collections (e.g., NOAA/CFSR)
-        first_image_bands = ee.Image(collection.first()).bandNames()
-        collection = collection.select(first_image_bands)
+        # Handle heterogeneous collections like Sentinel-1 GRD (different polarization modes: HH/HV vs VV/VH)
+        if "COPERNICUS/S1" in dataset:
+            # For Sentinel-1, use mosaic to merge all images and handle heterogeneous bands
+            # This creates a composite of all images, which works even with different polarization modes
+            image = collection.mosaic()
+            # Convert single image back to collection for getRegion()
+            collection = ee.ImageCollection([image])
+        else:
+            # For other datasets, try standard band homogenization
+            try:
+                first_image_bands = ee.Image(collection.first()).bandNames()
+                collection = collection.select(first_image_bands)
+            except ee.EEException:
+                # If band selection fails, use the collection as-is
+                pass
 
         data = collection.getRegion(point, scale).getInfo()
         if not data or len(data) < 2:
@@ -164,7 +159,7 @@ class GoogleEarthAPIDataCollector:
         return df
 
     def __load_data_from_dataset(
-        self, dataset, start_date, end_date, longitude, latitude, scale
+        self, dataset, start_date, end_date, latitude, longitude, scale
     ):
         point = ee.Geometry.Point([longitude, latitude])
 
@@ -184,96 +179,5 @@ class GoogleEarthAPIDataCollector:
         )
         data = dataset.getRegion(point, scale).getInfo()
         df = pd.DataFrame(data[1:], columns=data[0])
-
-        return df
-
-    def __load_sentinel2(self, dataset, start_date, end_date, longitude, latitude, scale):
-        """Load Sentinel-2 bands for a point and return a simple dataframe.
-
-        Returns columns: time (ms), and the selected bands. Additionally adds a 'date' column.
-        """
-        point = ee.Geometry.Point([longitude, latitude])
-
-        collection = ee.ImageCollection(dataset).filterDate(start_date, end_date)
-
-        bands = [
-            "B1",
-            "B2",
-            "B3",
-            "B4",
-            "B5",
-            "B6",
-            "B7",
-            "B8",
-            "B8A",
-            "B9",
-            "B11",
-            "B12",
-            "AOT",
-            "WVP",
-            "SCL",
-            "TCI_R",
-            "TCI_G",
-            "TCI_B",
-        ]
-
-        # Compute vegetation (NDVI, EVI, NDWI, and CGI) for each image
-        def add_vegetation(image):
-            # NDVI: (NIR - Red) / (NIR + Red)
-            ndvi = image.expression(
-                '((NIR - RED) / (NIR + RED))',
-                {
-                    'NIR': image.select('B8'),
-                    'RED': image.select('B4'),
-                },
-            ).rename('NDVI')
-
-            # EVI: 2.5 * (NIR - Red) / (NIR + 6*Red - 7.5*Blue + 1)
-            evi = image.expression(
-                '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))',
-                {
-                    'NIR': image.select('B8'),
-                    'RED': image.select('B4'),
-                    'BLUE': image.select('B2'),
-                },
-            ).rename('EVI')
-
-            # NDWI (McFeeters): (Green - NIR) / (Green + NIR)
-            ndwi = image.expression(
-                '((GREEN - NIR) / (GREEN + NIR))',
-                {
-                    'NIR': image.select('B8'),
-                    'GREEN': image.select('B3'),
-                },
-            ).rename('NDWI')
-
-            # CGI / GCI (Green Chlorophyll Index): (NIR / Green) - 1
-            cgi = image.expression(
-                '(NIR / GREEN) - 1',
-                {'NIR': image.select('B8'), 'GREEN': image.select('B3')},
-            ).rename('CGI')
-
-            return image.addBands([ndvi, evi, ndwi, cgi])
-
-        collection = collection.map(add_vegetation)
-        collection = collection.select(bands + ['NDVI', 'EVI', 'NDWI', 'CGI'])
-
-        data = collection.getRegion(point, scale).getInfo()
-        df = pd.DataFrame(data[1:], columns=data[0])
-
-        # Add a datetime column for convenience
-        if "time" in df.columns:
-            df["date"] = df["time"].apply(lambda x: pd.to_datetime(x / 1000, unit="s").date())
-
-        # Ensure NDVI column exists and is numeric (could be None for some entries)
-        if 'NDVI' in df.columns:
-            df['NDVI'] = pd.to_numeric(df['NDVI'], errors='coerce')
-
-        df = df.round(5)
-
-        # Reorder columns to put location and time at the end
-        cols = [c for c in df.columns if c not in ["longitude", "latitude", "time"]]
-        cols = cols + [c for c in ["longitude", "latitude", "time"] if c in df.columns]
-        df = df[cols]
 
         return df

@@ -13,10 +13,6 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Local vector databases
-chroma_db_v2/
-**/chroma_db_v2/
-
 # C extensions
 *.so
 
@@ -151,3 +147,6 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# History file
+.history/

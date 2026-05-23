@@ -35,27 +35,28 @@ def p_error(p):
     )
 
 
+# else:
+#         raise ParserError("Syntax error at EOF")
+
+
 ###########################
-# ==== SELECT STATEMENT WITH ADVANCED JOIN ====
+# ==== SELECT STATEMENT​​ ====
 ###########################
+
+
 def p_select(p):
-    """select : SELECT distinct select_columns into_statement FROM table_source join_clauses where group order limit_or_tail SIMICOLON"""
+    """select : SELECT distinct select_columns into_statement FROM DATASOURCE where group order limit_or_tail SIMICOLON"""
+    if type(p[3]) == str:
+        p[3] = "'" + p[3] + "'"
 
-    # ---- الداتا سورس الأساسي ----
-    main_table = p[6]  # {'datasource': 'csv:file.csv', 'alias': 't1' or None}
-    
-    # ---- Parse main datasource ----
-    main_ds = main_table['datasource']
-    main_alias = main_table.get('alias')
-    file_type, file_path = main_ds.split(":", 1)
+    file_type, file_path = p[6].split(":", 1)
 
-    # ---- INTO ----
-    load_type = None
-    load_path = None
+    load_stmt = ""
     if p[4]:
         load_type, load_path = p[4].split(":", 1)
+        load_stmt = f"etl.load(transformed_data,'{load_type}','{load_path}')\n"
 
-    load_call = ""
+    load_all = ""
     if load_type and load_path:
         load_call = f"etl.load(transformed_data, '{load_type}', '{load_path}')"
 
@@ -92,17 +93,88 @@ def p_select(p):
                 alias_mapping[join_alias] = join_var
             
             # Perform join
+            # Extract ALL column pairs from ON conditions (supports multiple ON columns with AND)
+            def extract_all_conditions(cond):
+                """Recursively extract all simple conditions from nested AND structure"""
+                conditions = []
+                if isinstance(cond, dict):
+                    if 'operator' in cond and cond['operator'].upper() == 'AND':
+                        # Complex condition with AND - extract from both sides
+                        conditions.extend(extract_all_conditions(cond['left']))
+                        conditions.extend(extract_all_conditions(cond['right']))
+                    elif 'left' in cond and 'right' in cond:
+                        # Simple condition
+                        conditions.append(cond)
+                return conditions
+            
+            all_conditions = extract_all_conditions(on_condition)
+            
             # Extract column names without alias (A.col → col)
-            left_col = on_condition['left'].split('.', 1)[-1]
-            right_col = on_condition['right'].split('.', 1)[-1]
-
-            join_code += f"extracted_data = etl.join(\n"
-            join_code += f"    extracted_data,\n"
-            join_code += f"    {join_var},\n"
-            join_code += f"    '{left_col}',\n"
-            join_code += f"    '{right_col}',\n"
-            join_code += f"    how='{join_type}'\n"
-            join_code += f")\n"
+            join_pairs = []
+            for base_condition in all_conditions:
+                left_col = base_condition['left'].split('.', 1)[-1]
+                right_col = base_condition['right'].split('.', 1)[-1]
+                join_pairs.append((left_col, right_col))
+            
+            # Determine suffixes once per join: use alias or dataset index
+            right_suffix = f"_{join_alias}" if join_alias else f"_t{idx+1}"
+            
+            # Generate join code for each column pair
+            for col_idx, (left_col, right_col) in enumerate(join_pairs):
+                if col_idx == 0:
+                    # Auto-detect tolerance for coordinate/spatial columns
+                    tolerance_val = "None"
+                    col_lower = left_col.lower()
+                    if any(x in col_lower for x in ["lat", "latitude", "lon", "longitude", "x", "y"]):
+                        # Use 0.0001 degree precision (~11 meters at equator)
+                        tolerance_val = "0.0001"
+                    elif any(x in col_lower for x in ["time", "timestamp", "date"]):
+                        # For time columns, use no tolerance (should be exact)
+                        tolerance_val = "None"
+                    
+                    # First join
+                    join_code += f"extracted_data = etl.join(\n"
+                    join_code += f"    extracted_data,\n"
+                    join_code += f"    {join_var},\n"
+                    join_code += f"    '{left_col}',\n"
+                    join_code += f"    '{right_col}',\n"
+                    join_code += f"    how='{join_type}',\n"
+                    join_code += f"    left_suffix='',\n"
+                    join_code += f"    right_suffix='{right_suffix}',\n"
+                    join_code += f"    tolerance={tolerance_val}\n"
+                    join_code += f")\n"
+                else:
+                    # Additional joins on the same tables for remaining columns
+                    # After merge, the right column has the suffix appended
+                    right_col_suffixed = f"{right_col}{right_suffix}"
+                    
+                    # Auto-detect tolerance for coordinate/spatial columns
+                    col_lower = left_col.lower()
+                    if any(x in col_lower for x in ["lat", "latitude", "lon", "longitude", "x", "y"]):
+                        # Use 0.0001 degree precision (~11 meters at equator)
+                        join_code += f"# Additional join on {left_col} ≈ {right_col} (with tolerance 0.0001)\n"
+                        join_code += f"extracted_data = extracted_data[\n"
+                        join_code += f"    (abs(extracted_data['{left_col}'] - extracted_data['{right_col_suffixed}']) <= 0.0001) |\n"
+                        join_code += f"    (extracted_data['{left_col}'].isna() & extracted_data['{right_col_suffixed}'].isna())\n"
+                        join_code += f"]\n"
+                    else:
+                        # Exact match for non-coordinate columns
+                        join_code += f"# Additional join on {left_col} = {right_col}\n"
+                        join_code += f"extracted_data = extracted_data[\n"
+                        join_code += f"    (extracted_data['{left_col}'] == extracted_data['{right_col_suffixed}']) |\n"
+                        join_code += f"    (extracted_data['{left_col}'].isna() & extracted_data['{right_col_suffixed}'].isna())\n"
+                        join_code += f"]\n"
+        
+        # After all joins, drop duplicate coordinate columns (keep only the unsuffixed ones from main dataset)
+        if join_clauses:
+            suffixes_list = []
+            for jdx, jc in enumerate(join_clauses):
+                suffix = f"_{jc.get('alias')}" if jc.get('alias') else f"_t{jdx+1}"
+                suffixes_list.append(suffix)
+            
+            join_code += f"# Drop duplicate coordinate columns from joined datasets\n"
+            join_code += f"cols_to_drop = [col for col in extracted_data.columns if (any(coord in col.lower() for coord in ['latitude', 'longitude', 'lat', 'lon']) and any(col.endswith(s) for s in {suffixes_list}))]\n"
+            join_code += f"extracted_data = extracted_data.drop(columns=cols_to_drop, errors='ignore')\n"
 
     # ---- WHERE, GROUP, ORDER, LIMIT ----
     where_clause = p[8]
@@ -115,15 +187,17 @@ def p_select(p):
     # Build alias → suffix map (for pandas merge)
     alias_suffix = {}
 
-    # main SELECT table always gets "_left"
+    # main SELECT table gets no suffix (left_suffix='')
     if main_alias:
-        alias_suffix[main_alias] = "_left"
+        alias_suffix[main_alias] = ""
 
-    # join tables get "_right" (for now supporting one join)
+    # join tables get unique suffixes based on alias or index
     if join_clauses:
-        for jc in join_clauses:
+        for idx, jc in enumerate(join_clauses):
             if jc['alias']:
-                alias_suffix[jc['alias']] = "_right"
+                alias_suffix[jc['alias']] = f"_{jc['alias']}"
+            else:
+                alias_suffix[f"join_df_{idx}"] = f"_t{idx+1}"
 
     def normalize_column(col):
         # Column is something like "A.firstname"
@@ -151,31 +225,38 @@ def p_select(p):
     p[0] = (
         "from app import etl\n"
         "from app.compiler.ast_nodes import *\n\n"
-        f"{extract_code}"
-        f"{join_code}"  # JOIN happens here, BEFORE transform
+        f"extracted_data = etl.extract('{file_type}','{file_path}')\n"
         f"transformed_data = etl.transform_select(\n"
-        f"    extracted_data,\n"
-        f"    {{\n"
-        f"        'COLUMNS': {repr(p[3]) if isinstance(p[3], str) else p[3]},\n"
+        f"   extracted_data,\n"
+        f"   {{\n"
+        f"        'COLUMNS':  {p[3]},\n"
         f"        'DISTINCT': {p[2]},\n"
-        f"        'FILTER': {where_clause},\n"
-        f"        'GROUP': {group_clause},\n"
-        f"        'ORDER': {order_clause},\n"
-        f"        'LIMIT_OR_TAIL': {limit_clause},\n"
-        f"    }}\n"
+        f"        'FILTER':   {p[7]},\n"
+        f"        'GROUP':    {p[8]},\n"
+        f"        'ORDER':    {p[9]},\n"
+        f"        'LIMIT_OR_TAIL': {p[10]},\n"
+        f"   }}\n"
         f")\n"
-        f"{load_call}\n"
+        f"{load_stmt}"
     )
 
 
 ###########################
 # ==== TABLE SOURCE (with optional alias) ====
 ###########################
-def p_table_source_with_alias(p):
+def p_table_source_with_explicit_alias(p):
     """table_source : DATASOURCE AS SIMPLE_COLNAME"""
     p[0] = {
         'datasource': p[1],
         'alias': p[3]
+    }
+
+
+def p_table_source_with_implicit_alias(p):
+    """table_source : DATASOURCE SIMPLE_COLNAME"""
+    p[0] = {
+        'datasource': p[1],
+        'alias': p[2]
     }
 
 
@@ -222,11 +303,13 @@ def p_join_clause(p):
 ###########################
 # ==== JOIN TYPES ====
 ###########################
-def p_join_type_inner(p):
-    """join_type : JOIN
-                 | INNER JOIN"""
+def p_join_type_implicit(p):
+    """join_type : JOIN"""
     p[0] = 'inner'
-
+    
+def p_join_type_inner(p):
+    """join_type : INNER JOIN"""
+    p[0] = 'inner'
 
 def p_join_type_left(p):
     """join_type : LEFT JOIN
@@ -293,14 +376,8 @@ def p_qualified_column_no_table(p):
 ###########################
 # ==== DOT token (we need to add this) ====
 ###########################
-# NOTE: You need to add DOT token to lex.py:
-# t_DOT = r"\."
-# And add "DOT" to tokens list
 
 
-###########################
-# ==== INSERT STATEMENT ====
-###########################
 def p_insert(p):
     "insert : INSERT INTO DATASOURCE icolumn VALUES insert_values SIMICOLON"
 
@@ -327,6 +404,8 @@ def p_update(p):
 ###########################
 # ==== DELETE STATEMENT​​ ====
 ###########################
+
+
 def p_delete(p):
     "delete : DELETE FROM DATASOURCE where"
     p[0] = None
@@ -335,6 +414,8 @@ def p_delete(p):
 ##########################
 # ====== COMPARISON =======
 ##########################
+
+
 def p_logical(p):
     """logical :  EQUAL
     | NOTEQUAL
@@ -348,6 +429,8 @@ def p_logical(p):
 ##########################
 # ====== WHERE CLAUSE =====
 ##########################
+
+
 def p_where(p):
     "where : WHERE conditions"
     p[0] = p[2]
@@ -379,19 +462,18 @@ def p_conditions_not(p):
 ##########################
 # ========== EXP ==========
 ##########################
+
+
 def p_exp(p):
     """exp : column
     | STRING
     | NUMBER"""
-    p[0] = p[1]
 
-def p_exp_qualified(p):
-    "exp : qualified_column"
     p[0] = p[1]
 
 
 ##########################
-# ========== NUMBER ==========
+# ========== EXP ==========
 ##########################
 def p_NUMBER(p):
     """NUMBER : NEGATIVE_INTNUMBER
@@ -403,6 +485,8 @@ def p_NUMBER(p):
 ###########################
 # ======== Distinct ========
 ###########################
+
+
 def p_distinct(p):
     """distinct : DISTINCT"""
     p[0] = True
@@ -432,14 +516,6 @@ def p_columns(p):
     p[0].extend(p[1])
     p[0].extend(p[3])
 
-def p_column_qualified(p):
-    "column : SIMPLE_COLNAME DOT SIMPLE_COLNAME"
-    p[0] = f"{p[1]}.{p[3]}"
-
-def p_column_qualified_bracket(p):
-    "column : SIMPLE_COLNAME DOT BRACKETED_COLNAME"
-    token = str(p[3])
-    p[0] = f"{p[1]}.{token[1:-1]}"
 
 def p_columns_base(p):
     """columns : column
@@ -460,11 +536,11 @@ def p_aggregation_function(p):
         )
 
 
-
-
 ###########################
 # ===== SELECT COLUMNS​​ =====
 ###########################
+
+
 def p_select_columns_all(p):
     "select_columns : TIMES"
     p[0] = "__all__"
@@ -478,6 +554,8 @@ def p_select_columns(p):
 ###########################
 # ========= Into ===========
 ###########################
+
+
 def p_into_statement(p):
     "into_statement : INTO DATASOURCE"
     p[0] = p[2]
@@ -511,13 +589,16 @@ def p_simple_column_name(p):
 def p_bracketed_column_name(p):
     """bracketed_column_name : BRACKETED_COLNAME"""
     token = str(p[1])
+    # to remove the scare brackets token[1:-1]
     p[0] = ColumnNameNode(token[1:-1])
 
 
 def p_column_index(p):
     """column_index : COLNUMBER"""
     token = str(p[1])
+    # to remove the scare brackets token[1:-1] and cast the str to int
     index = int(token[1:-1])
+
     p[0] = ColumnIndexNode(index=index)
 
 
@@ -583,6 +664,8 @@ def p_way_desc(p):
 ###########################
 # ========= Limit & Tail ==========
 ###########################
+
+
 def p_limit_or_tail(p):
     """limit_or_tail : LIMIT POSITIVE_INTNUMBER
     | TAIL POSITIVE_INTNUMBER"""
@@ -597,9 +680,12 @@ def p_limit_or_tail_empty(p):
 ###########################
 # ========= VALUES​ =========
 ###########################
+
+
 def p_value(p):
     """value : STRING
     | NUMBER"""
+
     p[0] = p[1]
 
 
@@ -613,6 +699,8 @@ def p_values(p):
 ###########################
 # ===== INSERT VALUES​ ======
 ###########################
+
+
 def p_values_end(p):
     "values : value"
     p[0] = [p[1]]
@@ -638,6 +726,8 @@ def p_insert_values_end(p):
 ###########################
 # ===== Insert Columns​​ =====
 ###########################
+
+
 def p_icolumn(p):
     "icolumn : LPAREN icolumns RPAREN"
     p[0] = p[2]
@@ -663,6 +753,8 @@ def p_icolumns_base(p):
 ###########################
 # ==== ASSIGNS STATEMENT​​ ===
 ###########################
+
+
 def p_assign(p):
     "assign : column EQUAL value"
     p[0] = (p[1], p[3])
