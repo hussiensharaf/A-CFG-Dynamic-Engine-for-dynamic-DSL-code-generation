@@ -106,6 +106,24 @@ Keywords Dynamic, Python, code generation, ETL, In-memory data collections, comp
 ### DB Example 2
 ![DB Example 2](.assets/DB2.png)
 
+### GEE Example 3
+![GEE Example 1](.assets/GEE1.png)
+
+### GEE Example 4
+![GEE Example 2](.assets/GEE2.png)
+
+### Line Plot Visualization Example
+![Line Plot Example](.assets/LINE1.png)
+
+### Scatter Plot Visualization Example
+![Scatter Plot Example](.assets/SCATTER1.png)
+
+### Bar Plot Visualization Example
+![Bar Plot Example](.assets/BAR1.png)
+
+### Map Visualization Example
+![Map Example](.assets/MAP1.png)
+
 ---
 
 ##  Project Structure
