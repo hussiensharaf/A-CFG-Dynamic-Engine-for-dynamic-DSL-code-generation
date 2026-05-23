@@ -3,6 +3,8 @@ import os
 import sys
 import threading
 import re
+import datetime
+import tkinter.messagebox as messagebox
 
 
 # Add AI Assistant to path
@@ -15,7 +17,6 @@ except ImportError:
 
 from typing import Any, Tuple
 import customtkinter as ctk
-import re
 
 
 from app.core.result_monad import Success
@@ -294,6 +295,114 @@ class TabContent(ctk.CTkFrame):
         self.clipboard_clear()
         self.clipboard_append(text)
         self.update()
+
+    def _sanitize_query_filename(self, text: str) -> str:
+        text = text.strip().replace("\n", " ").replace("\r", " ")
+        text = re.sub(r"[\\/:*?\"<>|]+", "_", text)
+        text = re.sub(r"\s+", "_", text)
+        return text[:120] if len(text) > 120 else text
+
+    def _get_query_save_dir(self) -> str:
+        save_dir = os.path.join(os.getcwd(), "saved_queries")
+        os.makedirs(save_dir, exist_ok=True)
+        return save_dir
+
+    def _extract_gee_info(self, sql_query: str) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+        # Updated pattern to match: {gee:project|dataset|start_date|end_date|lon|lat|scale}
+        pattern = re.compile(
+            r"\{gee:([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^|]+)\|([^}]+)\}",
+            re.IGNORECASE,
+        )
+        match = pattern.search(sql_query)
+        if not match:
+            return None, None, None, None, None
+
+        project = match.group(1).strip()  # Not used in filename
+        dataset = match.group(2).strip()
+        start_date = match.group(3).strip()
+        end_date = match.group(4).strip()
+        lon = match.group(5).strip()
+        lat = match.group(6).strip()
+        return dataset, start_date, end_date, lon, lat
+
+    def _extract_select_columns(self, sql_query: str) -> str:
+        pattern = re.compile(r"SELECT\s+(.+?)\s*FROM\b", re.IGNORECASE | re.DOTALL)
+        match = pattern.search(sql_query)
+        if not match:
+            return "all"
+
+        columns_part = match.group(1).strip()
+        if columns_part == "*":
+            return "all"
+
+        columns = [col.strip() for col in columns_part.split(",") if col.strip()]
+        cleaned = []
+        for col in columns:
+            col = re.sub(r"\(|\)", "", col)
+            col = re.sub(r"\s+AS\s+.*", "", col, flags=re.IGNORECASE)
+            col = col.replace(".", "_")
+            col = col.replace(" ", "_")
+            cleaned.append(col)
+        if not cleaned:
+            return "all"
+
+        return "-".join(cleaned[:3])
+
+    def _build_query_filename(self, sql_query: str) -> str:
+        dataset, start_date, end_date, lon, lat = self._extract_gee_info(sql_query)
+        columns = self._extract_select_columns(sql_query)
+
+        filename_parts = ["GEE_Query"]
+
+        if dataset:
+            filename_parts.append(dataset.replace("/", "_"))
+
+        if start_date and end_date:
+            filename_parts.append(f"{start_date}_to_{end_date}")
+
+        if lon and lat:
+            # Format coordinates as Lon_Lat, round to 2 decimals
+            try:
+                lon_float = float(lon)
+                lat_float = float(lat)
+                filename_parts.append(f"{lon_float:.2f}_{lat_float:.2f}")
+            except ValueError:
+                pass  # Skip if not valid numbers
+
+        if columns and columns != "all":
+            filename_parts.append(columns)
+
+        return "_".join(filename_parts)
+
+    def _save_query_to_file(self, sql_query: str = None) -> None:
+        if sql_query is None:
+            sql_query = self.last_sql_query
+        if not sql_query:
+            return  # No query to save
+        save_dir = self._get_query_save_dir()
+        filename_fragment = self._build_query_filename(sql_query)
+        filename_fragment = self._sanitize_query_filename(filename_fragment)
+
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        if filename_fragment:
+            base_name = f"{filename_fragment}.txt"
+        else:
+            base_name = f"{timestamp}_query.txt"
+        file_path = os.path.join(save_dir, base_name)
+
+        counter = 1
+        while os.path.exists(file_path):
+            if filename_fragment:
+                file_path = os.path.join(save_dir, f"{filename_fragment}_{counter}.txt")
+            else:
+                file_path = os.path.join(save_dir, f"{timestamp}_query_{counter}.txt")
+            counter += 1
+
+        with open(file_path, "w", encoding="utf-8") as query_file:
+            query_file.write(sql_query)
+
+        # Show confirmation message with the file path
+        messagebox.showinfo("Query Saved", f"Query saved successfully to:\n{file_path}")
 
     def change_sql_textbox_theme(self, theme: str) -> None:
         self.sql_textbox_theme = theme

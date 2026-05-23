@@ -258,11 +258,13 @@ class AutocompleteTextbox:
         self.trigger_chars = trigger_chars
         self.min_chars = min_chars
         self.popup: Optional[AutocompletePopup] = None
+        self._autocomplete_after_id = None
         
         # Bind events
         self.textbox.bind('<KeyRelease>', self._on_key_release)
         self.textbox.bind('<Control-space>', self._on_ctrl_space)
         self.textbox.bind('<Escape>', self._on_escape)
+        self.textbox.bind('<Button-1>', self._on_click)
         
         # Store original bindings for arrow keys
         self._setup_navigation()
@@ -276,19 +278,24 @@ class AutocompleteTextbox:
     
     def _on_key_release(self, event):
         """Handle key release event"""
-        # Ignore special keys
-        if event.keysym in ['Up', 'Down', 'Left', 'Right', 'Return', 'Escape', 'Tab']:
+        # Ignore navigation and command keys
+        if event.keysym in ['Up', 'Down', 'Left', 'Right', 'Return', 'Escape', 'Tab', 'Control_L', 'Control_R', 'Shift_L', 'Shift_R', 'Caps_Lock', 'Alt_L', 'Alt_R']:
             return
-        
-        # Check if we should show autocomplete
+
         char = event.char
         if char in self.trigger_chars or (char and len(char) == 1 and char.isalnum()):
-            self._show_autocomplete()
+            self._schedule_autocomplete()
+        else:
+            self._close_popup()
     
     def _on_ctrl_space(self, event):
         """Handle Ctrl+Space to trigger autocomplete"""
         self._show_autocomplete()
         return "break"
+
+    def _on_click(self, event):
+        """Close popup when clicking in the text box"""
+        self._close_popup()
     
     def _on_escape(self, event):
         """Handle Escape to close popup"""
@@ -320,28 +327,46 @@ class AutocompleteTextbox:
         if self.popup:
             self.popup.select_current()
             return "break"
+
+    def _close_popup(self):
+        """Close the autocomplete popup if it exists"""
+        if self.popup:
+            try:
+                self.popup.destroy()
+            except Exception:
+                pass
+            self.popup = None
+        if self._autocomplete_after_id:
+            self.textbox.after_cancel(self._autocomplete_after_id)
+            self._autocomplete_after_id = None
     
+    def _schedule_autocomplete(self):
+        """Debounce autocomplete to keep popup responsive"""
+        if self._autocomplete_after_id:
+            self.textbox.after_cancel(self._autocomplete_after_id)
+        self._autocomplete_after_id = self.textbox.after(75, self._show_autocomplete)
+
     def _show_autocomplete(self):
         """Show autocomplete popup"""
+        self._autocomplete_after_id = None
         # Close existing popup
         if self.popup:
             self.popup.destroy()
             self.popup = None
-        
+
         # Get current cursor position
         cursor_index = self.textbox.index("insert")
         row, col = map(int, cursor_index.split('.'))
-        
+
         # Get all text and calculate position
         all_text = self.textbox.get("1.0", "end-1c")
         cursor_pos = self._get_position_from_index(all_text, row - 1, col)
-        
+
         # Get suggestions
         result = self.engine.get_suggestions(all_text, cursor_pos)
-        
         if not result.suggestions:
             return
-        
+
         # Convert suggestions to SuggestionItems
         suggestions = [
             SuggestionItem(
@@ -351,15 +376,15 @@ class AutocompleteTextbox:
                 description=s.description,
                 auto_suffix=s.auto_suffix
             )
-            for s in result.suggestions
+            for s in result.suggestions[:12]
         ]
-        
+
         # Calculate popup position
         bbox = self.textbox.bbox(f"{row}.{col}")
         if bbox:
             x = self.textbox.winfo_rootx() + bbox[0]
             y = self.textbox.winfo_rooty() + bbox[1] + bbox[3]
-            
+
             # Create popup
             self.popup = AutocompletePopup(
                 self.textbox,

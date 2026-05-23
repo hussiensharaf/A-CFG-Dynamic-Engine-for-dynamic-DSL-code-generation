@@ -44,7 +44,15 @@ class TableWidget(ctk.CTkFrame):
         self.sheet.set_header_data(list(self.data.columns))
 
     def get_data(self) -> DataFrame:
-        return self.data
+        total_columns = self.sheet.total_columns()
+        if not total_columns:
+            return DataFrame()
+
+        headers = [self.sheet.get_header_data(c) for c in range(total_columns)]
+        rows = self.sheet.get_sheet_data(get_displayed=False, get_header=False)
+        if not rows:
+            return DataFrame(columns=headers)
+        return DataFrame(rows, columns=headers)
 
     def reset_data(self) -> None:
         self.data = DataFrame()

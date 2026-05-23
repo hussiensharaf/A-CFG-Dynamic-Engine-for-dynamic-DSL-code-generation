@@ -85,6 +85,7 @@ class VerticalTabView(ctk.CTkFrame):
             corner_radius=8,
             title=title,
             index=len(self.tabs_buttons),
+            content_frame=None,  # Will be set after creating content frame
         )
         new_tab_button.tab_button.configure(
             command=lambda: self.show_tab(new_tab_button.index)
@@ -104,6 +105,8 @@ class VerticalTabView(ctk.CTkFrame):
             # fg_color=colors[len(self.tabs_buttons) % len(colors)],
             fg_color="transparent",
         )
+        # Set the content frame reference in the tab button
+        new_tab_button.content_frame = new_content_frame
         new_tab_button.pack(fill="x", pady=5, padx=5)
         new_tab_button.pack_propagate(False)  # Prevent resizing
         self.tabs_buttons.append(new_tab_button)

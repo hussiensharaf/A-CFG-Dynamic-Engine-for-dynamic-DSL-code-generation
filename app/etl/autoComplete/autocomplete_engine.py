@@ -567,25 +567,18 @@ class AutocompleteEngine:
     def _fuzzy_match(self, text: str, partial: str) -> bool:
         """Check if partial matches text using fuzzy logic"""
         if not partial:
-            return True
-        
+            return False
+
         text_lower = text.lower()
         partial_lower = partial.lower()
-        
+
         if text_lower.startswith(partial_lower):
             return True
-        
-        if partial_lower in text_lower:
-            return True
-        
-        text_idx = 0
-        for char in partial_lower:
-            text_idx = text_lower.find(char, text_idx)
-            if text_idx == -1:
-                return False
-            text_idx += 1
-        
-        return True
+
+        if len(partial_lower) == 1:
+            return partial_lower in text_lower
+
+        return partial_lower in text_lower
     
     def _calculate_score(self, text: str, partial: str) -> float:
         """Calculate relevance score for a suggestion"""

@@ -19,6 +19,7 @@ class TabButton(ctk.CTkFrame):
         overwrite_preferred_drawing_method: str | None = None,
         title: str = "",
         index: int = 0,
+        content_frame: Any = None,
         **kwargs,
     ):
         super().__init__(
@@ -36,6 +37,7 @@ class TabButton(ctk.CTkFrame):
         )
         self.title = title
         self.index = index
+        self.content_frame = content_frame
         self.tab_button: ctk.CTkButton = ...
         self.pack_propagate(False)
         self.add_children_widgets()
@@ -114,6 +116,10 @@ class TabButton(ctk.CTkFrame):
         self.title = new_title
         self.tab_button.configure(text=self.__truncate_title(new_title))
         popup.destroy()
+        # Save the query when renaming the tab
+        if self.content_frame:
+            self.content_frame._save_query_to_file()
+
 
     def update_title_and_text(self, new_title: str) -> None:
         self.title = new_title
