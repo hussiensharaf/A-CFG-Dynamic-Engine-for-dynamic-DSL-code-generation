@@ -45,68 +45,76 @@ def p_error(p):
 
 
 def p_select(p):
-    """select : SELECT distinct select_columns into_statement FROM DATASOURCE where group order limit_or_tail SIMICOLON"""
-    if type(p[3]) == str:
-        p[3] = "'" + p[3] + "'"
+    """select : SELECT distinct select_columns into_statement FROM table_source join_clauses where group order limit_or_tail SIMICOLON"""
+    select_all_columns = p[3] == "__all__"
+    # Note: p[3] is left exactly as the parser produced it here (either the
+    # "__all__" sentinel string, or a list of column names/tuples). It is
+    # rendered into the generated source further down via repr(), which
+    # already produces correct, correctly-quoted Python syntax for both
+    # cases — any pre-quoting here would double-quote the sentinel string.
 
-    file_type, file_path = p[6].split(":", 1)
+    main_datasource = p[6]["datasource"]
+    main_alias = p[6]["alias"]
+    file_type, file_path = main_datasource.split(":", 1)
 
     load_stmt = ""
     if p[4]:
         load_type, load_path = p[4].split(":", 1)
         load_stmt = f"etl.load(transformed_data,'{load_type}','{load_path}')\n"
 
-    load_all = ""
-    if load_type and load_path:
-        load_call = f"etl.load(transformed_data, '{load_type}', '{load_path}')"
-
     # ---- Extract main data ----
     extract_code = f"extracted_data = etl.extract('{file_type}', '{file_path}')\n"
-    
+
     # ---- Store alias mapping ----
     alias_mapping = {}
     if main_alias:
         alias_mapping[main_alias] = 'extracted_data'
 
+    def extract_all_conditions(cond):
+        """
+        Recursively extract all simple {left, right} conditions from a
+        possibly-nested ON clause (A.x = B.x AND A.y = B.y ...). Shared by
+        the join codegen loop below and by normalize_column's join-key
+        check, which both need to look at every simple condition inside an
+        AND-combined ON clause, not just a single top-level one.
+        """
+        conditions = []
+        if isinstance(cond, dict):
+            if 'operator' in cond and cond['operator'].upper() == 'AND':
+                # Complex condition with AND - extract from both sides
+                conditions.extend(extract_all_conditions(cond['left']))
+                conditions.extend(extract_all_conditions(cond['right']))
+            elif 'left' in cond and 'right' in cond:
+                # Simple condition
+                conditions.append(cond)
+        return conditions
+
     # ---- JOIN CODE (multiple joins supported) ----
     join_clauses = p[7]  # List of join operations
     join_code = ""
-    
+
     if join_clauses:
         for idx, join_clause in enumerate(join_clauses):
             join_type = join_clause['type']  # 'inner', 'left', 'right', 'full'
             join_ds = join_clause['datasource']
             join_alias = join_clause.get('alias')
             on_condition = join_clause['on']
-            
+
             # Parse join datasource
             j_type, j_path = join_ds.split(":", 1)
-            
+
             # Generate unique variable name for each join
             join_var = f"join_df_{idx}"
-            
+
             # Extract join table
             join_code += f"{join_var} = etl.extract('{j_type}', '{j_path}')\n"
-            
+
             # Store alias if exists
             if join_alias:
                 alias_mapping[join_alias] = join_var
-            
+
             # Perform join
             # Extract ALL column pairs from ON conditions (supports multiple ON columns with AND)
-            def extract_all_conditions(cond):
-                """Recursively extract all simple conditions from nested AND structure"""
-                conditions = []
-                if isinstance(cond, dict):
-                    if 'operator' in cond and cond['operator'].upper() == 'AND':
-                        # Complex condition with AND - extract from both sides
-                        conditions.extend(extract_all_conditions(cond['left']))
-                        conditions.extend(extract_all_conditions(cond['right']))
-                    elif 'left' in cond and 'right' in cond:
-                        # Simple condition
-                        conditions.append(cond)
-                return conditions
-            
             all_conditions = extract_all_conditions(on_condition)
             
             # Extract column names without alias (A.col → col)
@@ -182,7 +190,7 @@ def p_select(p):
     order_clause = p[10]
     limit_clause = p[11]
 
-    # ==== Normalize SELECT columns based on alias -> real DataFrame columns ====
+    # ==== Normalize SELECT, WHERE and GROUP column references based on alias -> real DataFrame columns ====
 
     # Build alias → suffix map (for pandas merge)
     alias_suffix = {}
@@ -200,41 +208,138 @@ def p_select(p):
                 alias_suffix[f"join_df_{idx}"] = f"_t{idx+1}"
 
     def normalize_column(col):
-        # Column is something like "A.firstname"
+        """
+        Resolve an "alias.name" reference to the column pandas will actually
+        produce after the join. pandas only appends a suffix to columns that
+        collide between the two sides of a merge, so the real name can only
+        be known once the data is loaded — a plain-looking column (no
+        collision) must NOT be forced to carry the suffix. Returns either the
+        original string (no alias used) or a __RESOLVE_COL__(bare, suffixed)
+        marker that the generated code resolves at runtime against the
+        actual joined DataFrame's columns.
+
+        col may also be an aggregation tuple, e.g. ("mean", "B.temperature")
+        (SELECT mean(B.temperature) ...) - only the column reference inside
+        it needs normalizing, not the aggregation function name.
+        """
+        if isinstance(col, tuple):
+            func, col_ref = col
+            return (func, normalize_column(col_ref))
+
         if isinstance(col, str) and "." in col:
             alias, name = col.split(".", 1)
 
-            # If this column is a join key, pandas left it unsuffixed
+            # If this column is a join key, pandas always leaves it
+            # unsuffixed. An ON clause may combine several conditions with
+            # AND (ON A.x = B.x AND A.y = B.y), so every simple condition
+            # inside it has to be checked, not just a single top-level
+            # {left, right} pair.
             for jc in (join_clauses or []):
-                if jc['on']['left'].endswith("." + name) or jc['on']['right'].endswith("." + name):
-                    return name  # join key → no suffix
+                for simple_condition in extract_all_conditions(jc['on']):
+                    if simple_condition['left'].endswith("." + name) or \
+                       simple_condition['right'].endswith("." + name):
+                        return name  # join key → no suffix, known for certain
 
-            # Otherwise: normal alias-based suffix
             suffix = alias_suffix.get(alias, "")
-            return f"{name}{suffix}"
+            if not suffix:
+                return name
+            # Unknown until runtime whether pandas suffixed this column.
+            return f"__RESOLVE_COL__({name!r}, {f'{name}{suffix}'!r})"
 
         return col
 
+    def normalize_condition(cond):
+        """Recursively normalize alias.column references inside a WHERE/GROUP tree."""
+        if isinstance(cond, dict):
+            new_cond = dict(cond)
+            for key in ("left", "right", "operand"):
+                if key in new_cond:
+                    new_cond[key] = normalize_condition(new_cond[key])
+            return new_cond
+        if isinstance(cond, list):
+            return [normalize_condition(item) for item in cond]
+        return normalize_column(cond)
 
-    if p[3] != "__all__":
+    if not select_all_columns:
         p[3] = [normalize_column(c) for c in p[3]]
 
+    def normalize_order_by(node):
+        """
+        Resolve alias.column references inside an ORDER BY clause the same
+        way normalize_column does for SELECT/WHERE/GROUP. Unlike those,
+        ORDER BY's AST is a tree of dataclasses (OrderByNode ->
+        OrderByParameter -> ColumnNameNode/AggregationNode) rather than
+        plain strings/dicts, so columns are normalized in place on the
+        ColumnNameNode.name (and on AggregationNode.column.name) fields
+        before the whole tree is repr()'d into the generated source below.
+        """
+        if node is None:
+            return None
+        for order_param in node.parameters:
+            param = order_param.parameter
+            if isinstance(param, ColumnNameNode) and "." in param.name:
+                param.name = normalize_column(param.name)
+            elif isinstance(param, AggregationNode) and isinstance(
+                param.column, ColumnNameNode
+            ) and "." in param.column.name:
+                param.column.name = normalize_column(param.column.name)
+        return node
 
+    if join_clauses:
+        # Only rewrite alias.column references when a join is actually present;
+        # a plain (non-join) query keeps its columns exactly as written.
+        where_clause = normalize_condition(where_clause)
+        group_clause = normalize_condition(group_clause)
+        order_clause = normalize_order_by(order_clause)
 
-    # ---- الكود النهائي ----
+    # repr() of the COLUMNS/FILTER/GROUP structures above embeds
+    # "__RESOLVE_COL__('bare', 'suffixed')" as a quoted *string* (since it's
+    # nested inside a Python list/dict literal that was built from plain
+    # strings). Turn those markers back into real resolve_col(...) calls in
+    # the generated source so they execute against the live DataFrame.
+    resolve_helper = ""
+    columns_src = repr(p[3])
+    where_src = repr(where_clause)
+    group_src = repr(group_clause)
+    order_src = repr(order_clause)
+    if join_clauses:
+        import re as _re
+
+        def _unquote_resolver(text):
+            # repr() may wrap the marker in single or double quotes depending
+            # on whether the embedded column names themselves contain a
+            # single quote; match either.
+            return _re.sub(
+                r"""(['"])__RESOLVE_COL__\((.*?)\)\1""",
+                lambda m: f"resolve_col({m.group(2)})",
+                text,
+            )
+
+        columns_src = _unquote_resolver(columns_src)
+        where_src = _unquote_resolver(where_src)
+        group_src = _unquote_resolver(group_src)
+        order_src = _unquote_resolver(order_src)
+        resolve_helper = (
+            "def resolve_col(bare, suffixed, _df=extracted_data):\n"
+            "    return bare if bare in _df.columns else suffixed\n"
+        )
+
+    # ---- Final generated code ----
     p[0] = (
         "from app import etl\n"
         "from app.compiler.ast_nodes import *\n\n"
-        f"extracted_data = etl.extract('{file_type}','{file_path}')\n"
+        f"{extract_code}"
+        f"{join_code}"
+        f"{resolve_helper}"
         f"transformed_data = etl.transform_select(\n"
         f"   extracted_data,\n"
         f"   {{\n"
-        f"        'COLUMNS':  {p[3]},\n"
+        f"        'COLUMNS':  {columns_src},\n"
         f"        'DISTINCT': {p[2]},\n"
-        f"        'FILTER':   {p[7]},\n"
-        f"        'GROUP':    {p[8]},\n"
-        f"        'ORDER':    {p[9]},\n"
-        f"        'LIMIT_OR_TAIL': {p[10]},\n"
+        f"        'FILTER':   {where_src},\n"
+        f"        'GROUP':    {group_src},\n"
+        f"        'ORDER':    {order_src},\n"
+        f"        'LIMIT_OR_TAIL': {limit_clause},\n"
         f"   }}\n"
         f")\n"
         f"{load_stmt}"
@@ -361,13 +466,9 @@ def p_on_conditions_base(p):
 ###########################
 # ==== QUALIFIED COLUMN (table.column or column) ====
 ###########################
-def p_qualified_column_with_table(p):
-    """qualified_column : SIMPLE_COLNAME DOT SIMPLE_COLNAME
-                        | SIMPLE_COLNAME DOT BRACKETED_COLNAME"""
-    # table.column format
-    p[0] = f"{p[1]}.{p[3]}"
-
-
+# "column" already accepts the "table.column" form (see p_column_qualified
+# above), so qualified_column is just an alias for it — kept as its own
+# nonterminal so the ON-clause grammar reads clearly.
 def p_qualified_column_no_table(p):
     """qualified_column : column"""
     p[0] = p[1]
@@ -381,15 +482,32 @@ def p_qualified_column_no_table(p):
 def p_insert(p):
     "insert : INSERT INTO DATASOURCE icolumn VALUES insert_values SIMICOLON"
 
-    p[3] = str(p[3]).replace("\\", "\\\\")
+    # p[3] is the DATASOURCE token, already stripped of its {...} braces by
+    # the lexer (t_DATASOURCE) - e.g. "csv:/path/to/file.csv". Split it into
+    # (type, path) the same way p_select does, instead of passing the whole
+    # string through as a literal path.
+    datasource = str(p[3]).replace("\\", "\\\\")
+    file_type, file_path = datasource.split(":", 1)
+
+    def strip_string_quotes(value):
+        # The STRING token keeps its surrounding double quotes (p_select's
+        # WHERE/filter codegen relies on that to embed them as valid Python
+        # literals). For INSERT, the actual cell value must not include
+        # those quote characters, so strip them here instead of changing
+        # the shared token.
+        if isinstance(value, str) and len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+            return value[1:-1]
+        return value
+
+    rows = [[strip_string_quotes(cell) for cell in row] for row in p[6]]
+
     p[0] = (
         f"from app import etl\n"
         f"import pandas as pd\n"
         f"\n"
-        f"values = {p[6]}\n"
-        f"data_destination = '{p[3]}'\n"
+        f"values = {rows!r}\n"
         f"data = pd.DataFrame(values, columns={p[4]})\n"
-        f"etl.load(data, data_destination)\n"
+        f"etl.load(data, '{file_type}', '{file_path}')\n"
     )
 
 
@@ -510,6 +628,17 @@ def p_column(p):
     p[0] = c
 
 
+def p_column_qualified(p):
+    """column : SIMPLE_COLNAME DOT SIMPLE_COLNAME
+    | SIMPLE_COLNAME DOT BRACKETED_COLNAME"""
+    # table_alias.column_name, e.g. "A.firstname" — resolved later against
+    # the join's alias map in p_select / normalize_column.
+    name = str(p[3])
+    if name.startswith("[") and name.endswith("]") and not name[1:-1].isdigit():
+        name = name[1:-1]
+    p[0] = f"{p[1]}.{name}"
+
+
 def p_columns(p):
     """columns : columns COMMA columns"""
     p[0] = []
@@ -584,6 +713,19 @@ def p_group_empty(p):
 def p_simple_column_name(p):
     """simple_column_name : SIMPLE_COLNAME"""
     p[0] = ColumnNameNode(str(p[1]))
+
+
+def p_simple_column_name_qualified(p):
+    """simple_column_name : SIMPLE_COLNAME DOT SIMPLE_COLNAME
+    | SIMPLE_COLNAME DOT BRACKETED_COLNAME"""
+    # table_alias.column_name in ORDER BY, e.g. "ORDER BY B.temperature DESC".
+    # Stored the same way p_column_qualified stores it for SELECT/GROUP BY
+    # ("alias.name"), so it goes through the same normalize_column/
+    # resolve_col runtime-resolution path in p_select.
+    name = str(p[3])
+    if name.startswith("[") and name.endswith("]") and not name[1:-1].isdigit():
+        name = name[1:-1]
+    p[0] = ColumnNameNode(f"{p[1]}.{name}")
 
 
 def p_bracketed_column_name(p):

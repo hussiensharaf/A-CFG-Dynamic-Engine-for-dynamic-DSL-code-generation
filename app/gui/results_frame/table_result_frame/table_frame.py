@@ -182,3 +182,135 @@ class TableResultFrame(ctk.CTkFrame):
     def change_table_theme(self, theme: str) -> None:
         self.table_theme = theme
         self.table.sheet.change_theme(theme.lower() + " blue")
+
+    # ------------------------------------------------------------------
+    # Table actions (Sort / Delete Column / Compute Column / Save CSV)
+    # ------------------------------------------------------------------
+    def _get_selected_column(self) -> Optional[int]:
+        """Return the index of the selected column (or the column of the
+        selected cell), or None if nothing is selected."""
+        sheet = self.table.sheet
+        try:
+            columns = sorted(sheet.get_selected_columns())
+            if columns:
+                return int(columns[0])
+            current = sheet.get_currently_selected()
+            column = getattr(current, "column", None)
+            if column is not None:
+                return int(column)
+        except Exception:
+            pass
+        return None
+
+    def _require_table_and_column(self) -> Optional[Tuple[DataFrame, int]]:
+        """Shared checks: table has data and a column is selected."""
+        df = self.get_table()
+        if df.empty and len(df.columns) == 0:
+            messagebox.showinfo("No data", "The table is empty.", parent=self)
+            return None
+        index = self._get_selected_column()
+        if index is None or index >= len(df.columns):
+            messagebox.showinfo(
+                "Select a column",
+                "Click a column header (or any cell in the column) first.",
+                parent=self,
+            )
+            return None
+        return df, index
+
+    def sort_by_selected_column(self) -> None:
+        checked = self._require_table_and_column()
+        if checked is None:
+            return
+        df, index = checked
+        name = df.columns[index]
+        ascending = messagebox.askyesnocancel(
+            "Sort",
+            f"Sort by '{name}'.\n\nYes = ascending\nNo = descending",
+            parent=self,
+        )
+        if ascending is None:
+            return
+        try:
+            sorted_df = df.sort_values(
+                by=df.columns[index], ascending=ascending, kind="stable", na_position="last"
+            )
+        except TypeError:
+            # Mixed types in the column: fall back to sorting as text
+            sorted_df = df.sort_values(
+                by=df.columns[index],
+                ascending=ascending,
+                kind="stable",
+                key=lambda col: col.astype(str),
+            )
+        self.set_table(sorted_df.reset_index(drop=True))
+
+    def delete_selected_column(self) -> None:
+        checked = self._require_table_and_column()
+        if checked is None:
+            return
+        df, index = checked
+        name = df.columns[index]
+        if not messagebox.askyesno(
+            "Delete column", f"Delete column '{name}' from the table?", parent=self
+        ):
+            return
+        keep = [i for i in range(len(df.columns)) if i != index]
+        self.set_table(df.iloc[:, keep].copy())
+
+    def add_computed_column(self) -> None:
+        df = self.get_table()
+        if len(df.columns) == 0:
+            messagebox.showinfo("No data", "The table is empty.", parent=self)
+            return
+        new_name = simpledialog.askstring(
+            "Compute column", "Name of the new column:", parent=self
+        )
+        if not new_name or not new_name.strip():
+            return
+        new_name = new_name.strip()
+        if new_name in df.columns:
+            if not messagebox.askyesno(
+                "Column exists",
+                f"'{new_name}' already exists. Overwrite it?",
+                parent=self,
+            ):
+                return
+        expression = simpledialog.askstring(
+            "Compute column",
+            "Expression using existing columns, e.g.  price * quantity\n"
+            "(wrap names containing spaces in backticks: `unit price` * 2)",
+            parent=self,
+        )
+        if not expression or not expression.strip():
+            return
+        try:
+            result = df.eval(expression.strip())
+            df = df.copy()
+            df[new_name] = result
+        except Exception as e:
+            messagebox.showerror(
+                "Compute column", f"Could not evaluate the expression:\n{e}", parent=self
+            )
+            return
+        self.set_table(df)
+
+    def save_table_csv(self) -> None:
+        df = self.get_table()
+        if len(df.columns) == 0:
+            messagebox.showinfo("No data", "There is no table to save.", parent=self)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Save table as CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            df.to_csv(path, index=False, encoding="utf-8-sig")
+        except Exception as e:
+            messagebox.showerror("Save CSV", f"Could not save the file:\n{e}", parent=self)
+            return
+        messagebox.showinfo("Save CSV", f"Saved {len(df)} rows to:\n{path}", parent=self)

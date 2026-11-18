@@ -426,8 +426,13 @@ class MetadataProvider:
         FORMAT: {location|start|end|lon|lat|scale|dataset}
         """
         self.table_aliases.clear()
-        
-        pattern = r'\{([^}]+)\}\s*([A-Za-z_]\w*)?'
+
+        # The compiler's own grammar accepts an explicit "AS alias" form in
+        # addition to the implicit "{ds} alias" form (see
+        # p_table_source_with_explicit_alias/p_table_source_with_implicit_alias
+        # in app/compiler/yacc.py) - the optional, non-capturing "AS" here
+        # skips that keyword so it isn't itself mistaken for the alias.
+        pattern = r'\{([^}]+)\}\s*(?:AS\s+)?([A-Za-z_]\w*)?'
         
         matches = re.finditer(pattern, query_text, re.IGNORECASE)
         

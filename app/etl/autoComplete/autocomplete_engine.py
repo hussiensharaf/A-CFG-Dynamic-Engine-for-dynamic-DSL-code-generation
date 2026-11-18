@@ -495,8 +495,24 @@ class AutocompleteEngine:
             table_match = re.search(r'([A-Za-z_]\w*)\.$', text_before_cursor)
             if table_match and self.metadata_provider:
                 table_alias = table_match.group(1)
+                # get_columns_for_table reads metadata_provider.table_aliases,
+                # which is only populated by _parse_query_for_tables - every
+                # other context that needs it gets that for free by going
+                # through get_columns()/get_qualified_columns() first, but
+                # this one calls get_columns_for_table directly, so without
+                # this it depends on some earlier, unrelated suggestion
+                # request having already parsed the same query's aliases.
+                self.metadata_provider._parse_query_for_tables(text_before_cursor)
                 columns = self.metadata_provider.get_columns_for_table(table_alias)
-                suggestions.extend(self._create_column_suggestions(columns, partial_word))
+                # partial_word here is "alias." (or "alias.partial_name") -
+                # _extract_partial_word's character class includes '.', so
+                # it always carries the "alias." prefix along with it. Column
+                # names never contain a literal '.', so fuzzy-matching them
+                # against that un-stripped prefix would fail almost every
+                # suggestion; only the part actually typed after the dot is
+                # the real filter for the column name itself.
+                column_partial = partial_word.rsplit(".", 1)[-1]
+                suggestions.extend(self._create_column_suggestions(columns, column_partial))
         
         elif context in [AutocompleteContext.GROUP_BY_COLUMNS, AutocompleteContext.ORDER_BY_COLUMNS]:
             # Add ALL attributes

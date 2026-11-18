@@ -34,7 +34,7 @@ class CSVFlatData(IFlatData):
 
     @override
     def load(self, data: pd.DataFrame) -> None:
-        return data.to_csv(self.path)
+        return data.to_csv(self.path, index=False)
 
 
 class EXCELFlatData(IFlatData):

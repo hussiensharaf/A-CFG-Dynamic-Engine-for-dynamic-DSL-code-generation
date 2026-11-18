@@ -26,6 +26,14 @@ reserved = [
     "UPDATE",
     "SET",
     "DELETE",
+    "AS",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "OUTER",
+    "ON",
 ]
 tokens = [
     "FLOATNUMBER",
@@ -53,6 +61,7 @@ tokens = [
     "STRING",
     "PATTERN",
     "AGGREGATION_FUNCTION",
+    "DOT",
 ] + reserved
 
 # Regular expression rules for simple tokens
@@ -71,6 +80,7 @@ t_SMALLER_EQUAL = r"<="
 t_SMALLER = r"<"
 t_SIMICOLON = r";"
 t_COMMA = r","
+t_DOT = r"\."
 
 # ignored characters
 t_ignore = " \t"  # Spaces and tabs
@@ -225,6 +235,46 @@ def t_LIMIT(t):
 @TOKEN(r"tail")
 def t_TAIL(t):
     t.value = t.value.lower()
+    return t
+
+
+@TOKEN(r"as")
+def t_AS(t):
+    return t
+
+
+@TOKEN(r"join")
+def t_JOIN(t):
+    return t
+
+
+@TOKEN(r"inner")
+def t_INNER(t):
+    return t
+
+
+@TOKEN(r"left")
+def t_LEFT(t):
+    return t
+
+
+@TOKEN(r"right")
+def t_RIGHT(t):
+    return t
+
+
+@TOKEN(r"full")
+def t_FULL(t):
+    return t
+
+
+@TOKEN(r"outer")
+def t_OUTER(t):
+    return t
+
+
+@TOKEN(r"on")
+def t_ON(t):
     return t
 
 

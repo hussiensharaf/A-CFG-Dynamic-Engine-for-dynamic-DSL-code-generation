@@ -3,6 +3,7 @@ import os
 import sys
 import threading
 import re
+import datetime
 
 
 # Add AI Assistant to path
@@ -24,7 +25,91 @@ from app.gui.error_frame.error_frame import ErrorFrame
 
 from app.gui.results_frame.results_frame import ResultsFrame
 from app.gui.vertical_tab_view.sql_textbox_colorizer import Colorizer
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
+import csv
+
+
+_AREA_NAME_KEYS = {"name", "area", "area name", "areaname", "site", "place", "location", "title", "id"}
+_AREA_LON_KEYS = {"longitude", "lon", "lng", "long", "x"}
+_AREA_LAT_KEYS = {"latitude", "lat", "y"}
+
+
+def _read_text_file(file_path):
+    """Read a text file whatever its encoding (Excel UTF-8 with BOM, Arabic Windows, etc.)."""
+    with open(file_path, "rb") as f:
+        raw = f.read()
+    for encoding in ("utf-8-sig", "cp1256", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1")
+
+
+def _to_float(text):
+    value = str(text).strip().replace(" ", "")
+    if "," in value and "." not in value:
+        value = value.replace(",", ".")  # decimal comma, e.g. 30,40
+    return float(value)
+
+
+def parse_areas_csv(file_path):
+    """
+    Read an areas CSV. Returns (areas, skipped_messages).
+    areas = {name: {"longitude": float, "latitude": float}}
+    Accepts , ; tab or | separators, any capitalisation, and the column names
+    name / longitude / latitude (also lon, lng, lat, ...). The name column is optional.
+    Raises ValueError with a plain-English message if the file cannot be used.
+    """
+    text = _read_text_file(file_path)
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError("The file is empty.")
+    delimiter = max(",;\t|", key=lambda d: lines[0].count(d))
+    if lines[0].count(delimiter) == 0:
+        delimiter = ","
+    rows = list(csv.reader(lines, delimiter=delimiter))
+    header = [h.strip().strip("\ufeff").lower() for h in rows[0]]
+
+    def find(keys):
+        for i, h in enumerate(header):
+            if h in keys:
+                return i
+        return None
+
+    i_lon, i_lat, i_name = find(_AREA_LON_KEYS), find(_AREA_LAT_KEYS), find(_AREA_NAME_KEYS)
+    if i_lon is None or i_lat is None:
+        raise ValueError(
+            "Could not find the longitude and latitude columns.\n\n"
+            "The first row of the file must contain column names such as:\n"
+            "name,longitude,latitude\n\n"
+            "Columns found: " + ", ".join(h or "(blank)" for h in header)
+        )
+
+    areas, skipped = {}, []
+    for line_no, row in enumerate(rows[1:], start=2):
+        try:
+            lon = _to_float(row[i_lon])
+            lat = _to_float(row[i_lat])
+        except (ValueError, IndexError):
+            skipped.append(f"Row {line_no}: longitude or latitude is missing or is not a number")
+            continue
+        if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+            skipped.append(f"Row {line_no}: coordinates out of range (are longitude and latitude swapped?)")
+            continue
+        name = row[i_name].strip() if i_name is not None and i_name < len(row) else ""
+        name = name or f"Area {len(areas) + 1}"
+        base, n = name, 2
+        while name in areas:
+            name, n = f"{base} ({n})", n + 1
+        areas[name] = {"longitude": lon, "latitude": lat}
+    if not areas:
+        raise ValueError("No usable rows were found.\n\n" + "\n".join(skipped[:8]))
+    return areas, skipped
+
+
+def _fmt_coord(value):
+    return f"{value:.6f}".rstrip("0").rstrip(".")
 
 
 class TabContent(ctk.CTkFrame):
@@ -149,7 +234,7 @@ class TabContent(ctk.CTkFrame):
             values=["Circle", "Polygon"],
             width=150,
         )
-        self.area_mode.set("Circle")
+        self.area_mode.set("Polygon")
 
         self.insert_area_btn = ctk.CTkButton(
             self.area_frame,
@@ -218,9 +303,9 @@ class TabContent(ctk.CTkFrame):
         self.error_section.pack(fill="x", pady=5, padx=10)
         self.error_section.pack_propagate(False)
 
-    def extract_gee_metadata(self, sql_query: str):
+    def _extract_gee_metadata_area(self, sql_query: str):
         """
-        Extract Google Earth Engine metadata from SQL query.
+        (Unused draft) Extract Google Earth Engine metadata from SQL query.
         Handles both circle and AREA formats.
         """
         try:
@@ -266,6 +351,10 @@ class TabContent(ctk.CTkFrame):
                     'is_area': False
                 }
 
+            return None
+        except Exception as e:
+            print(f"Error extracting GEE metadata: {e}")
+            return None
 
     def extract_gee_metadata(self, sql: str):
         if not sql:
@@ -498,37 +587,43 @@ class TabContent(ctk.CTkFrame):
         if not file_path:
             return
         try:
-            self.areas_data = {}
-            with open(file_path, newline='', encoding='utf-8') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
-                    name = row['name'].strip()
-                    lon = float(row['longitude'].strip())
-                    lat = float(row['latitude'].strip())
-                    self.areas_data[name] = {'longitude': lon, 'latitude': lat}
-            if self.areas_data:
-                self.area_dropdown.configure(values=list(self.areas_data.keys()))
-                self.area_dropdown.set(list(self.areas_data.keys())[0])
+            areas, skipped = parse_areas_csv(file_path)
         except Exception as e:
-            print(f"Error loading CSV: {e}")
+            messagebox.showerror("Load Areas CSV", str(e))
+            return
+        self.areas_data = areas
+        names = list(areas.keys())
+        self.area_dropdown.configure(values=names)
+        self.area_dropdown.set(names[0])
+        message = f"Loaded {len(names)} area(s)."
+        if skipped:
+            message += "\n\nSkipped rows:\n" + "\n".join(skipped[:8])
+        messagebox.showinfo("Load Areas CSV", message)
 
     def insert_area_into_query(self):
-        selected_area = self.area_dropdown.get()
-        area = self.areas_data.get(selected_area)
+        area = self.areas_data.get(self.area_dropdown.get())
         if not area:
-            return
-        lon = area['longitude']
-        lat = area['latitude']
-        mode = self.area_mode.get()
-        if mode == "Circle":
-            text = f"{lon}|{lat}|9000"
-        else:
-            offset = 0.05
-            text = (
-                f"AREA(({lon-offset},{lat-offset}),"
-                f"({lon+offset},{lat-offset}),"
-                f"({lon+offset},{lat+offset}),"
-                f"({lon-offset},{lat+offset}))"
+            messagebox.showinfo(
+                "Insert Area",
+                "Click 'Load Areas CSV' first, then choose an area from the list."
             )
+            return
+        if self.area_mode.get() == "Circle":
+            messagebox.showwarning(
+                "Circle is not supported yet",
+                "Single-point (Circle) queries do not work yet. Please choose Polygon."
+            )
+            return
+        lon = area["longitude"]
+        lat = area["latitude"]
+        offset = 0.05
+        corners = [
+            (lon - offset, lat - offset),
+            (lon + offset, lat - offset),
+            (lon + offset, lat + offset),
+            (lon - offset, lat + offset),
+        ]
+        points = ",".join(f"({_fmt_coord(x)},{_fmt_coord(y)})" for x, y in corners)
+        text = f"0|0|0|AREA({points})"
         self.sql_textbox.insert("insert", text)
         Colorizer.highlight_syntax(self.sql_textbox, self.sql_textbox_theme)

@@ -219,7 +219,24 @@ def join(
             # Use merge_asof for approximate numeric joins (requires sorted data)
             df1_sorted = df1.sort_values(by=left_col).copy()
             df2_sorted = df2.sort_values(by=right_col).copy()
-            
+
+            # merge_asof always keeps every row of the left side (there is no
+            # native how= on it), so for an inner join we need our own
+            # "did this row actually match" signal to filter by afterwards.
+            # dropna(subset=[right_col]) is NOT reliable for that: when
+            # left_col == right_col (very common - e.g. both called
+            # "latitude"), merge_asof keeps a single, always-populated
+            # left-derived key column, so an unmatched row's key is never
+            # NaN and nothing gets dropped even though how='inner' was
+            # requested. A dedicated marker column that only exists on the
+            # right side survives the merge only for rows that actually
+            # matched, regardless of what the key columns are named or
+            # whether df2's own data happens to contain nulls.
+            match_marker = "__etl_join_matched__"
+            while match_marker in df1_sorted.columns or match_marker in df2_sorted.columns:
+                match_marker += "_"
+            df2_sorted[match_marker] = True
+
             try:
                 result = pd.merge_asof(
                     df1_sorted,
@@ -233,7 +250,8 @@ def join(
                 # merge_asof preserves order, but may differ from original - not ideal for all joins
                 # For inner joins, filter to keep only matched rows
                 if how == "inner":
-                    result = result.dropna(subset=[right_col])
+                    result = result[result[match_marker].notna()]
+                result = result.drop(columns=[match_marker])
             except Exception as e:
                 raise Exception(
                     f"Error during approximate join: {str(e)} "

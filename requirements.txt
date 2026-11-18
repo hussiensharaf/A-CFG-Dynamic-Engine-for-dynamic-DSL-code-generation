@@ -1,0 +1,48 @@
+# EarthData Query / QueryFlow - Python dependencies
+# Tested with Python 3.12 on Windows.
+# Install with:  pip install -r requirements.txt
+
+# --- Desktop interface ---
+customtkinter==6.0.0
+tksheet==7.6.0
+pillow==13.0.0
+
+# --- SQL compiler ---
+ply==3.11
+sqlparse==0.6.0
+black==26.10.1
+
+# --- Testing (tests/, run with: pytest) ---
+pytest==9.1.1
+
+# --- Data handling and file formats (csv, json, excel, xml, html) ---
+pandas==3.1.0
+numpy==2.5.4
+openpyxl==3.1.5
+lxml==6.1.3
+sqlalchemy==2.1.6
+
+# --- Charts and maps ---
+matplotlib==3.11.2
+seaborn==0.13.2
+mplcursors==0.7.1
+folium==0.20.0
+
+# --- Google Earth Engine ---
+earthengine-api==1.7.49
+
+# --- Images and video 
+opencv-python==5.0.0.93
+
+# --- AI assistant (imported at startup; needs API keys in a .env file to be used) ---
+python-dotenv==1.2.4
+tqdm==4.70.1
+playwright==1.64.1
+langchain-core==1.7.0
+langchain-openai==1.7.2
+langchain-ollama==1.1.0
+langchain-chroma==1.1.0
+langchain-nvidia-ai-endpoints==1.5.0
+
+# --- Optional: only for MS SQL Server sources (also needs "ODBC Driver 18 for SQL Server") ---
+# pyodbc
